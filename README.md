@@ -47,7 +47,7 @@ Send the token as header `X-Library-Token: <token>`, or `?token=<token>`.
 | `GET /api/download/<id>` | Same file as an attachment (for offline saving in the app) |
 | `POST /api/rescan` | Re-scan the music folder → `{ok, tracks}` |
 | `GET /upload` | Web upload page (asks for the token once, stores a cookie) |
-| `POST /upload` | Multipart upload, field name **`files`** (multiple). Saves flat into the music folder, then rescans. |
+| `POST /upload` | Multipart upload, field name **`files`** (multiple). Saves flat into the music folder, then rescans. Also accepts **`.zip` files**: audio entries (and `.lrc` lyrics sidecars) are extracted automatically — zip your whole music folder and upload it in one go. Up to 1 GB per request, so split very large libraries into a few ZIPs. |
 
 ## Deploy on Railway
 
@@ -68,7 +68,9 @@ Send the token as header `X-Library-Token: <token>`, or `?token=<token>`.
 5. **Generate a public domain** (service → Settings → Networking) — you'll
    get a `https://….up.railway.app` URL.
 6. **Upload your music:** open `https://<your-url>/upload` in a browser,
-   enter the token once, and upload your MP3/M4A files (your own files —
+   enter the token once, then either select many files at once in the
+   picker (Ctrl/Cmd+A in your music folder) or upload a ZIP of the whole
+   folder — never one song at a time (your own files —
    e.g. exported from your PC library). Tags decide artist/album; file
    names don't matter much.
 7. **Point the iPad app at it:** in Offline Music v2's server settings,

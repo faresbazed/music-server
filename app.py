@@ -17,6 +17,7 @@ On Railway:    gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4
 
 import hashlib
 import hmac
+import io
 import json
 import mimetypes
 import os
@@ -26,6 +27,7 @@ import string
 import threading
 import time
 import unicodedata
+import zipfile
 from pathlib import Path
 
 import requests
@@ -753,11 +755,14 @@ _UPLOAD_PAGE = """<!doctype html>
 <style>body{font-family:-apple-system,system-ui,sans-serif;margin:2em auto;max-width:32em;padding:0 1em}
 input,button{font-size:1em;padding:.5em;width:100%;box-sizing:border-box;margin:.4em 0}</style>
 <h1>Upload music</h1>
-<p>Choose audio files (mp3, m4a, aac, wav, aif, aiff, flac, ogg). They are
-saved into the library and indexed straight away. Folder structure is
-flattened - tags decide artist/album.</p>
+<p>Two bulk ways - never one song at a time:</p>
+<p><b>Select many files at once</b> in the picker (Ctrl/Cmd+A inside a
+folder), or <b>upload one ZIP</b> of your whole music folder - audio files
+inside it are extracted automatically, .lrc lyrics files included.</p>
+<p>Up to 1 GB per upload, so split a big library into a few ZIPs.
+Files are saved flat - tags decide artist/album and playlist matching.</p>
 <form method="POST" action="/upload" enctype="multipart/form-data">
-  <input type="file" name="files" multiple accept="audio/*,.mp3,.m4a,.aac,.wav,.aif,.aiff,.flac,.ogg">
+  <input type="file" name="files" multiple accept="audio/*,.mp3,.m4a,.aac,.wav,.aif,.aiff,.flac,.ogg,.zip">
   <button type="submit">Upload</button>
 </form>
 """
@@ -776,6 +781,65 @@ def upload_page():
     return resp
 
 
+def _unique_dest(name: str) -> Path:
+    dest = MUSIC_DIR / name
+    if dest.exists():
+        stem, suffix = dest.stem, dest.suffix
+        n = 2
+        while dest.exists():
+            dest = MUSIC_DIR / f"{stem}-{n}{suffix}"
+            n += 1
+    return dest
+
+
+_MAX_ZIP_TOTAL = 5 * 1024 * 1024 * 1024   # 5 GB extracted per ZIP
+_MAX_ZIP_FILE = 300 * 1024 * 1024         # 300 MB per file inside a ZIP
+
+
+def _save_zip(fh) -> int:
+    """Extract audio files from an uploaded ZIP into MUSIC_DIR (flat).
+
+    Only basenames are used (no path traversal), non-audio entries are
+    skipped (including .lrc/.txt lyrics sidecars, which ARE kept next to
+    nothing - they are saved with their audio-matching basename so the
+    scanner picks them up as sidecars for same-named tracks).
+    Returns the number of audio files saved.
+    """
+    saved = 0
+    extracted = 0
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(fh.read()))
+    except zipfile.BadZipFile:
+        return 0
+    for info in zf.infolist():
+        if info.is_dir():
+            continue
+        base = secure_filename(Path(info.filename).name)
+        if not base:
+            continue
+        suffix = Path(base).suffix.lower()
+        is_audio = suffix in AUDIO_EXTS
+        is_sidecar = suffix in (".lrc", ".txt")
+        if not is_audio and not is_sidecar:
+            continue
+        if info.file_size > _MAX_ZIP_FILE or extracted + info.file_size > _MAX_ZIP_TOTAL:
+            continue
+        try:
+            data = zf.read(info)
+        except Exception:
+            continue
+        extracted += len(data)
+        dest = _unique_dest(base)
+        # A sidecar that collides with an existing sidecar would be renamed
+        # and stop matching its track; skip duplicate sidecars instead.
+        if is_sidecar and (MUSIC_DIR / base).exists():
+            continue
+        dest.write_bytes(data)
+        if is_audio:
+            saved += 1
+    return saved
+
+
 @app.route("/upload", methods=["POST"])
 def upload_files():
     files = request.files.getlist("files")
@@ -784,17 +848,13 @@ def upload_files():
         raw_name = (fh.filename or "").strip()
         if not raw_name:
             continue
+        if Path(raw_name).suffix.lower() == ".zip":
+            saved += _save_zip(fh)
+            continue
         name = secure_filename(Path(raw_name).name)
         if not name or Path(name).suffix.lower() not in AUDIO_EXTS:
             continue
-        dest = MUSIC_DIR / name
-        if dest.exists():
-            stem, suffix = dest.stem, dest.suffix
-            n = 2
-            while dest.exists():
-                dest = MUSIC_DIR / f"{stem}-{n}{suffix}"
-                n += 1
-        fh.save(str(dest))
+        fh.save(str(_unique_dest(name)))
         saved += 1
     total = scan_library()
     wants_json = "application/json" in (request.headers.get("Accept") or "") \
