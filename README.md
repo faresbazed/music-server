@@ -18,6 +18,30 @@ Metro Boomin / Kendrick Lamar …)). All playlists ship in the catalogue — a
 playlist track with no uploaded file yet simply shows `has_file: false`
 until you upload a file whose title + artist (or duration) matches it.
 
+## Playlist importer (v1.1)
+
+Import a playlist's **track list** and match it against your own uploaded
+MP3s — from the web page **`/import`**, from the iPad app (Server →
+**Import**), or via the API:
+
+1. **Spotify playlist link** — needs `SPOTIFY_CLIENT_ID` +
+   `SPOTIFY_CLIENT_SECRET` env vars (create a free app at
+   developer.spotify.com; client-credentials flow, public playlists,
+   **metadata only**). Without the keys you get a clear
+   `spotify_not_configured` error, not a fake success.
+2. **Paste a track list** — one per line, `Title | Artist`.
+3. **Upload a `.json` / `.csv`** track list (seed/Spotify shape, or
+   `title,artist` columns).
+
+Imported playlists are saved to `$DATA_DIR/imported_playlists.json` (so
+they survive redeploys on the Volume), appear in `/api/catalog` next to
+the seed playlists, and can be opened in the app and **Download All**-ed
+into the iPad Library. `GET /api/missing?playlist=<name>` reports which
+tracks you haven't uploaded yet, and
+`GET /api/download-playlist?playlist=<name>` returns a ZIP of the
+**matched files only** (your own MP3s) plus `playlist.m3u` and a
+`missing.txt`. No audio is ever fetched from Spotify/YouTube/anywhere.
+
 ## How it works
 
 - On start (and on `POST /api/rescan`) it scans the music folder with
@@ -46,6 +70,12 @@ Send the token as header `X-Library-Token: <token>`, or `?token=<token>`.
 | `GET /api/stream/<id>` | Audio stream with HTTP Range support (seeking) |
 | `GET /api/download/<id>` | Same file as an attachment (for offline saving in the app) |
 | `POST /api/rescan` | Re-scan the music folder → `{ok, tracks}` |
+| `POST /api/import/spotify` | JSON `{url}` — import a Spotify playlist's track list (metadata only; needs the Spotify env keys) → `{ok, report}` |
+| `POST /api/import/text` | JSON `{name, text}` — import a pasted track list → `{ok, report}` |
+| `POST /api/import/json` | JSON playlist / `{playlists:[...]}` — import track lists → `{ok, report}` |
+| `GET /api/missing?playlist=<name>` | Match report for any playlist: `{total, matched, missing_count, matched_tracks, missing_tracks}` |
+| `GET /api/download-playlist?playlist=<name>` | ZIP of your own matched files for that playlist + `playlist.m3u` + `missing.txt` (404 if nothing matched yet) |
+| `GET /import` | Web playlist-import page (token once, cookie after) |
 | `GET /upload` | Web upload page (asks for the token once, stores a cookie) |
 | `POST /upload` | Multipart upload, field name **`files`** (multiple). Saves flat into the music folder, then rescans. Also accepts **`.zip` files**: audio entries (and `.lrc` lyrics sidecars) are extracted automatically — zip your whole music folder and upload it in one go. Up to 1 GB per request, so split very large libraries into a few ZIPs. |
 

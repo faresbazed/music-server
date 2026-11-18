@@ -15,8 +15,11 @@ Run locally:   flask --app app run   (or: python app.py)
 On Railway:    gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4
 """
 
+import base64
+import csv
 import hashlib
 import hmac
+import html as html_mod
 import io
 import json
 import mimetypes
@@ -67,6 +70,7 @@ ART_DIR = CACHE_DIR / "art"
 ARTIST_DIR = CACHE_DIR / "artist"
 LYRICS_CACHE_PATH = CACHE_DIR / "lyrics.json"
 ENRICH_CACHE_PATH = CACHE_DIR / "enrich.json"
+IMPORTED_PATH = DATA_DIR / "imported_playlists.json"
 
 AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".wav", ".aif", ".aiff", ".flac", ".ogg"}
 HTTP_TIMEOUT = 6
@@ -303,6 +307,20 @@ def _extract_metadata(path: Path) -> dict:
 SEED = _json_load(SEED_PATH, {"playlists": []})
 SEED_PLAYLISTS = SEED.get("playlists", []) if isinstance(SEED, dict) else []
 
+# Playlists imported at runtime (Spotify link / pasted track list / JSON-CSV
+# file). Persisted on the data volume so they survive Railway redeploys.
+_imported_doc = _json_load(IMPORTED_PATH, {"playlists": []})
+IMPORTED_PLAYLISTS = (_imported_doc.get("playlists", [])
+                      if isinstance(_imported_doc, dict) else [])
+
+
+def _save_imported() -> None:
+    _json_save(IMPORTED_PATH, {"playlists": IMPORTED_PLAYLISTS})
+
+
+def _all_playlists() -> list:
+    return list(SEED_PLAYLISTS) + list(IMPORTED_PLAYLISTS)
+
 _index_lock = threading.RLock()
 _FILES: dict[str, dict] = {}   # id -> record (record includes private keys)
 _FILES_ORDER: list[str] = []     # ids sorted by relpath
@@ -518,7 +536,7 @@ def _auth_gate():
         if not _token_ok():
             return jsonify({"error": "unauthorized",
                             "detail": "missing or wrong library token"}), 401
-    elif path == "/upload" and request.method != "GET":
+    elif path in ("/upload", "/import") and request.method != "GET":
         if not _token_ok():
             return jsonify({"error": "unauthorized",
                             "detail": "missing or wrong library token"}), 401
@@ -559,13 +577,14 @@ def status():
     with _index_lock:
         count = len(_FILES)
     payload = {"ok": True, "service": "music-library-server",
-               "tracks": count, "playlists": len(SEED_PLAYLISTS)}
+               "tracks": count, "playlists": len(_all_playlists())}
     if request.accept_mimetypes.best == "text/html":
         return make_response(
             "<!doctype html><title>Music Library Server</title>"
             f"<h1>Music Library Server</h1><p>OK &middot; {count} track(s) &middot; "
-            f"{len(SEED_PLAYLISTS)} playlist(s)</p>"
-            '<p><a href="/upload">Upload music</a></p>')
+            f"{len(_all_playlists())} playlist(s)</p>"
+            '<p><a href="/upload">Upload music</a> &middot; '
+            '<a href="/import">Import a playlist</a></p>')
     return jsonify(payload)
 
 
@@ -574,7 +593,7 @@ def catalog():
     _all, ordered = _snapshot()
     library = [_public_track(rec) for rec in ordered]
     playlists = []
-    for pl in SEED_PLAYLISTS:
+    for pl in _all_playlists():
         tracks = []
         for st in pl.get("tracks", []):
             rec = _match_file_for_seed(st, ordered)
@@ -865,6 +884,404 @@ def upload_files():
         "<!doctype html><title>Uploaded</title>"
         f"<p>Saved {saved} file(s). Library now has {total} track(s).</p>"
         '<p><a href="/upload">Upload more</a></p>')
+
+
+# ---------------------------------------------------------------------------
+# Playlist importer (metadata only)
+#
+# Imports a playlist's TRACK LIST into the catalogue, then matches it
+# against the owner's OWN uploaded files using the same matcher as the
+# seed playlists. It never fetches audio: matched tracks are the files
+# already on this server, missing tracks are only reported by name.
+# Three ways in:
+#   1. Spotify playlist link - needs SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET
+#      env vars (a free app at developer.spotify.com). Client-credentials
+#      flow, public playlists only, metadata only.
+#   2. Paste a track list - one per line: "Title | Artist" (or Title - Artist).
+#   3. Upload a .json (seed/Spotify shape) or .csv (title,artist) file.
+# ---------------------------------------------------------------------------
+
+
+def _parse_spotify_playlist_id(value: str):
+    if not value:
+        return None
+    value = str(value).strip()
+    m = re.search(r"spotify:playlist:([A-Za-z0-9]+)", value)
+    if m:
+        return m.group(1)
+    m = re.search(r"open\.spotify\.com/(?:intl-[a-z]{2}/)?playlist/([A-Za-z0-9]+)",
+                  value)
+    if m:
+        return m.group(1)
+    if re.fullmatch(r"[A-Za-z0-9]{22}", value):
+        return value
+    return None
+
+
+def _spotify_fetch_playlist(playlist_id: str) -> dict:
+    cid = os.environ.get("SPOTIFY_CLIENT_ID", "").strip()
+    secret = os.environ.get("SPOTIFY_CLIENT_SECRET", "").strip()
+    if not cid or not secret:
+        raise ValueError(
+            "spotify_not_configured: set SPOTIFY_CLIENT_ID and "
+            "SPOTIFY_CLIENT_SECRET on Railway (free app at "
+            "developer.spotify.com), or use the paste / file import instead")
+    tok_resp = requests.post(
+        "https://accounts.spotify.com/api/token",
+        data={"grant_type": "client_credentials"},
+        auth=(cid, secret), timeout=HTTP_TIMEOUT,
+        headers={"User-Agent": USER_AGENT})
+    if tok_resp.status_code != 200:
+        raise ValueError(f"spotify_auth_failed: HTTP {tok_resp.status_code}")
+    headers = {"Authorization": f"Bearer {tok_resp.json().get('access_token')}",
+               "User-Agent": USER_AGENT}
+    resp = requests.get(f"https://api.spotify.com/v1/playlists/{playlist_id}",
+                        headers=headers, timeout=HTTP_TIMEOUT)
+    if resp.status_code != 200:
+        raise ValueError(f"spotify_fetch_failed: HTTP {resp.status_code}")
+    data = resp.json()
+    items, nxt = [], (data.get("tracks") or {}).get("next")
+    items.extend((data.get("tracks") or {}).get("items") or [])
+    while nxt:
+        r2 = requests.get(nxt, headers=headers, timeout=HTTP_TIMEOUT)
+        if r2.status_code != 200:
+            break
+        page = r2.json()
+        items.extend(page.get("items") or [])
+        nxt = page.get("next")
+    tracks = []
+    for item in items:
+        tr = (item or {}).get("track") if isinstance(item, dict) else None
+        if not tr or tr.get("is_local"):
+            continue
+        artists = ", ".join(a.get("name", "") for a in (tr.get("artists") or [])
+                            if a.get("name"))
+        tracks.append({
+            "title": tr.get("name"),
+            "artist": artists or None,
+            "duration_ms": tr.get("duration_ms"),
+            "spotify_url": (tr.get("external_urls") or {}).get("spotify"),
+            "spotify_uri": tr.get("uri"),
+        })
+    return {"name": data.get("name") or f"Spotify playlist {playlist_id}",
+            "spotify_url": (data.get("external_urls") or {}).get("spotify"),
+            "tracks": tracks}
+
+
+def _norm_track(raw: dict):
+    if not isinstance(raw, dict):
+        return None
+    title = raw.get("title") or raw.get("name")
+    if not title:
+        return None
+    artist = raw.get("artist")
+    if not artist and isinstance(raw.get("artists"), list):
+        parts = []
+        for a in raw["artists"]:
+            parts.append(a.get("name") if isinstance(a, dict) else str(a))
+        artist = ", ".join(p for p in parts if p)
+    dur_ms = raw.get("duration_ms")
+    if dur_ms is None and raw.get("duration_sec") is not None:
+        try:
+            dur_ms = int(round(float(raw["duration_sec"]) * 1000))
+        except (TypeError, ValueError):
+            dur_ms = None
+    return {"title": str(title), "artist": str(artist) if artist else None,
+            "duration_ms": dur_ms,
+            "spotify_url": raw.get("spotify_url"),
+            "spotify_uri": raw.get("spotify_uri")}
+
+
+def _parse_track_text(text: str) -> list:
+    tracks = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        title, artist = line, None
+        if "|" in line:
+            title, artist = (p.strip() for p in line.split("|", 1))
+        elif "\t" in line:
+            title, artist = (p.strip() for p in line.split("\t", 1))
+        elif " - " in line:
+            title, artist = (p.strip() for p in line.split(" - ", 1))
+        elif "," in line:
+            title, artist = (p.strip() for p in line.split(",", 1))
+        t = _norm_track({"title": title, "artist": artist})
+        if t:
+            tracks.append(t)
+    return tracks
+
+
+def _parse_import_file(data: bytes, filename: str) -> dict:
+    suffix = Path(filename or "").suffix.lower()
+    if suffix == ".csv" or (suffix != ".json" and b"," in data[:512]
+                            and not data.lstrip().startswith(b"{")):
+        rows = list(csv.DictReader(io.StringIO(data.decode("utf-8-sig",
+                                                           errors="replace"))))
+        tracks = [t for t in (_norm_track(r) for r in rows) if t]
+        name = Path(filename or "Imported playlist").stem
+        return {"name": name, "spotify_url": None, "tracks": tracks}
+    doc = json.loads(data.decode("utf-8-sig", errors="replace"))
+    if isinstance(doc, dict) and isinstance(doc.get("playlists"), list) \
+            and doc["playlists"]:
+        doc = doc["playlists"][0]
+    if isinstance(doc, list):
+        doc = {"name": Path(filename or "Imported playlist").stem,
+               "tracks": doc}
+    tracks = [t for t in (_norm_track(r) for r in doc.get("tracks", [])) if t]
+    return {"name": doc.get("name") or Path(filename or "Imported").stem,
+            "spotify_url": doc.get("spotify_url"), "tracks": tracks}
+
+
+def _add_imported_playlist(name: str, tracks: list, spotify_url=None,
+                           source: str = "import") -> dict:
+    pl = {"name": (name or "Imported playlist").strip() or "Imported playlist",
+          "spotify_url": spotify_url, "source": source,
+          "tracks": [t for t in tracks if t]}
+    key_url = spotify_url or ""
+    key_name = _norm(pl["name"])
+    kept = [p for p in IMPORTED_PLAYLISTS
+            if not ((key_url and p.get("spotify_url") == key_url)
+                    or _norm(p.get("name")) == key_name)]
+    kept.append(pl)
+    IMPORTED_PLAYLISTS.clear()
+    IMPORTED_PLAYLISTS.extend(kept)
+    _save_imported()
+    return pl
+
+
+def _find_playlist(name: str):
+    if not name:
+        return None
+    for pl in _all_playlists():
+        if pl.get("name") == name or _norm(pl.get("name")) == _norm(name):
+            return pl
+    return None
+
+
+def _playlist_report(pl: dict) -> dict:
+    _all, ordered = _snapshot()
+    matched, missing = [], []
+    for st in pl.get("tracks", []):
+        rec = _match_file_for_seed(st, ordered)
+        if rec is not None:
+            matched.append({"title": st.get("title"),
+                            "artist": st.get("artist"), "id": rec["id"]})
+        else:
+            missing.append({"title": st.get("title"),
+                            "artist": st.get("artist"),
+                            "duration_ms": st.get("duration_ms"),
+                            "spotify_url": st.get("spotify_url")})
+    return {"name": pl.get("name"), "spotify_url": pl.get("spotify_url"),
+            "total": len(pl.get("tracks", [])), "matched": len(matched),
+            "missing_count": len(missing), "matched_tracks": matched,
+            "missing_tracks": missing}
+
+
+@app.route("/api/import/spotify", methods=["POST"])
+def import_spotify():
+    body = request.get_json(silent=True) or {}
+    pid = _parse_spotify_playlist_id(body.get("url") or body.get("id") or "")
+    if not pid:
+        return jsonify({"error": "bad_spotify_url",
+                        "detail": "paste a Spotify playlist link"}), 400
+    try:
+        fetched = _spotify_fetch_playlist(pid)
+    except ValueError as exc:
+        return jsonify({"error": "import_failed", "detail": str(exc)}), 400
+    pl = _add_imported_playlist(body.get("name") or fetched["name"],
+                                fetched["tracks"],
+                                spotify_url=fetched.get("spotify_url"),
+                                source="spotify")
+    return jsonify({"ok": True, "report": _playlist_report(pl)})
+
+
+@app.route("/api/import/text", methods=["POST"])
+def import_text():
+    body = request.get_json(silent=True) or {}
+    tracks = _parse_track_text(body.get("text") or "")
+    if not tracks:
+        return jsonify({"error": "no_tracks",
+                        "detail": "one track per line: Title | Artist"}), 400
+    pl = _add_imported_playlist(body.get("name") or "Imported playlist",
+                                tracks,
+                                spotify_url=body.get("spotify_url"),
+                                source="text")
+    return jsonify({"ok": True, "report": _playlist_report(pl)})
+
+
+@app.route("/api/import/json", methods=["POST"])
+def import_json():
+    body = request.get_json(silent=True) or {}
+    docs = body.get("playlists") or [body]
+    reports = []
+    for doc in docs:
+        if not isinstance(doc, dict):
+            continue
+        tracks = [t for t in (_norm_track(r) for r in doc.get("tracks", []))
+                  if t]
+        if not tracks:
+            continue
+        pl = _add_imported_playlist(doc.get("name") or "Imported playlist",
+                                    tracks,
+                                    spotify_url=doc.get("spotify_url"),
+                                    source="json")
+        reports.append(_playlist_report(pl))
+    if not reports:
+        return jsonify({"error": "no_tracks"}), 400
+    return jsonify({"ok": True, "report": reports[0], "reports": reports})
+
+
+@app.route("/api/missing")
+def missing():
+    pl = _find_playlist(request.args.get("playlist") or "")
+    if pl is None:
+        return jsonify({"error": "playlist_not_found"}), 404
+    return jsonify(_playlist_report(pl))
+
+
+@app.route("/api/download-playlist")
+def download_playlist():
+    pl = _find_playlist(request.args.get("playlist") or "")
+    if pl is None:
+        return jsonify({"error": "playlist_not_found"}), 404
+    _all, ordered = _snapshot()
+    buf = io.BytesIO()
+    used, m3u, missing_lines, count = set(), ["#EXTM3U"], [], 0
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for idx, st in enumerate(pl.get("tracks", []), 1):
+            rec = _match_file_for_seed(st, ordered)
+            if rec is None:
+                missing_lines.append(
+                    f"{st.get('title') or ''} - {st.get('artist') or ''}")
+                continue
+            path = Path(rec["path"])
+            if not path.is_file():
+                continue
+            ext = path.suffix.lower() or ".mp3"
+            base = secure_filename(
+                f"{idx:03d} - {st.get('title') or path.stem}") or f"{idx:03d}"
+            arc = base + ext
+            n = 2
+            while arc in used:
+                arc = f"{base}-{n}{ext}"
+                n += 1
+            used.add(arc)
+            zf.write(str(path), arc)
+            m3u.append(arc)
+            count += 1
+        zf.writestr("playlist.m3u", "\n".join(m3u) + "\n")
+        if missing_lines:
+            zf.writestr("missing.txt",
+                        "Not on this server yet (upload your own files "
+                        "for these):\n" + "\n".join(missing_lines) + "\n")
+    if count == 0:
+        return jsonify({"error": "no_matched_files",
+                        "detail": "none of this playlist's tracks are "
+                                  "uploaded to this server yet"}), 404
+    buf.seek(0)
+    safe = secure_filename(pl.get("name") or "playlist") or "playlist"
+    return send_file(buf, mimetype="application/zip", as_attachment=True,
+                     download_name=f"{safe}.zip")
+
+
+_IMPORT_TOKEN_PAGE = _UPLOAD_TOKEN_PAGE.replace('action="/upload"',
+                                                'action="/import"')
+
+_IMPORT_PAGE = """<!doctype html>
+<title>Music Library - import playlist</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>body{font-family:-apple-system,system-ui,sans-serif;margin:2em auto;max-width:34em;padding:0 1em}
+input,button,textarea{font-size:1em;padding:.5em;width:100%;box-sizing:border-box;margin:.4em 0}
+textarea{height:9em}fieldset{margin:1em 0}</style>
+<h1>Import a playlist</h1>
+<p>This imports the <b>track list only</b>. Tracks are matched against
+<b>your own MP3s already uploaded</b> to this server - nothing is
+downloaded from Spotify. You get a matched / missing report, and matched
+playlists appear in the app catalogue ready for Download All.</p>
+<fieldset><legend>1. Spotify playlist link (needs server Spotify keys)</legend>
+<form method="POST" action="/import">
+  <input type="hidden" name="mode" value="spotify">
+  <input type="text" name="url" placeholder="https://open.spotify.com/playlist/...">
+  <button type="submit">Import from Spotify</button>
+</form></fieldset>
+<fieldset><legend>2. Paste a track list</legend>
+<form method="POST" action="/import">
+  <input type="hidden" name="mode" value="text">
+  <input type="text" name="name" placeholder="Playlist name" required>
+  <textarea name="text" placeholder="One per line: Title | Artist"></textarea>
+  <button type="submit">Import track list</button>
+</form></fieldset>
+<fieldset><legend>3. Upload a .json / .csv track list</legend>
+<form method="POST" action="/import" enctype="multipart/form-data">
+  <input type="hidden" name="mode" value="file">
+  <input type="file" name="file" accept=".json,.csv">
+  <button type="submit">Import file</button>
+</form></fieldset>
+<p><a href="/api/download-playlist">.</a><a href="/upload">Upload music</a></p>
+"""
+
+
+@app.route("/import", methods=["GET"])
+def import_page():
+    if not _token_ok():
+        return make_response(_IMPORT_TOKEN_PAGE)
+    resp = make_response(_IMPORT_PAGE)
+    supplied = request.args.get("token") or request.headers.get("X-Library-Token")
+    if supplied and hmac.compare_digest(str(supplied), LIBRARY_TOKEN):
+        resp.set_cookie("library_token", LIBRARY_TOKEN, max_age=30 * 24 * 3600,
+                        httponly=True, samesite="Lax")
+    return resp
+
+
+@app.route("/import", methods=["POST"])
+def import_submit():
+    mode = (request.form.get("mode") or "").strip()
+    try:
+        if mode == "spotify":
+            pid = _parse_spotify_playlist_id(request.form.get("url") or "")
+            if not pid:
+                raise ValueError("bad_spotify_url: paste a playlist link")
+            fetched = _spotify_fetch_playlist(pid)
+            pl = _add_imported_playlist(fetched["name"], fetched["tracks"],
+                                         spotify_url=fetched.get("spotify_url"),
+                                         source="spotify")
+        elif mode == "file":
+            fh = request.files.get("file")
+            if fh is None or not fh.filename:
+                raise ValueError("no_file: choose a .json or .csv file")
+            parsed = _parse_import_file(fh.read(), fh.filename)
+            pl = _add_imported_playlist(parsed["name"], parsed["tracks"],
+                                         spotify_url=parsed.get("spotify_url"),
+                                         source="file")
+        else:
+            tracks = _parse_track_text(request.form.get("text") or "")
+            if not tracks:
+                raise ValueError("no_tracks: one per line, Title | Artist")
+            pl = _add_imported_playlist(
+                request.form.get("name") or "Imported playlist", tracks,
+                source="text")
+    except Exception as exc:
+        return make_response(
+            "<!doctype html><title>Import failed</title>"
+            f"<p>Import failed: {html_mod.escape(str(exc))}</p>"
+            '<p><a href="/import">Back</a></p>'), 400
+    rep = _playlist_report(pl)
+    missing_html = "".join(
+        f"<li>{html_mod.escape(t.get('title') or '')} - "
+        f"{html_mod.escape(t.get('artist') or '')}</li>"
+        for t in rep["missing_tracks"])
+    name_q = html_mod.escape(pl.get("name") or "", quote=True)
+    return make_response(
+        "<!doctype html><title>Imported</title>"
+        f"<h1>{html_mod.escape(pl.get('name') or '')}</h1>"
+        f"<p>{rep['matched']} of {rep['total']} track(s) matched your "
+        f"uploaded files; {rep['missing_count']} missing.</p>"
+        f"<ul>{missing_html}</ul>"
+        f'<p><a href="/api/download-playlist?playlist={name_q}">'
+        "Download ZIP of matched (your) files</a> &middot; "
+        '<a href="/import">Import another</a></p>')
 
 
 # ---------------------------------------------------------------------------
