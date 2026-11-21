@@ -21,6 +21,7 @@ import hashlib
 import hmac
 import html as html_mod
 import io
+import itertools
 import json
 import mimetypes
 import os
@@ -782,7 +783,7 @@ input,button{font-size:1em;padding:.5em;width:100%;box-sizing:border-box;margin:
 folder), or <b>upload one ZIP</b> of your whole music folder - audio files
 inside it are extracted automatically, .lrc lyrics files included.</p>
 <p>Up to 1 GB per upload, so split a big library into a few ZIPs.
-Files are saved flat - tags decide artist/album and playlist matching.</p>
+Tags decide artist/album and playlist matching.</p>
 <form method="POST" action="/upload" enctype="multipart/form-data">
   <input type="file" name="files" multiple accept="audio/*,.mp3,.m4a,.aac,.wav,.aif,.aiff,.flac,.ogg,.zip">
   <button type="submit">Upload</button>
@@ -803,14 +804,29 @@ def upload_page():
     return resp
 
 
-def _unique_dest(name: str, *, taken_stems: set[str] | None = None) -> Path:
+def _unique_dest(name: str) -> Path:
     dest = MUSIC_DIR / name
-    stem, suffix = dest.stem, dest.suffix
-    n = 2
-    while dest.exists() or (taken_stems is not None and dest.stem in taken_stems):
-        dest = MUSIC_DIR / f"{stem}-{n}{suffix}"
-        n += 1
+    if dest.exists():
+        stem, suffix = dest.stem, dest.suffix
+        n = 2
+        while dest.exists():
+            dest = MUSIC_DIR / f"{stem}-{n}{suffix}"
+            n += 1
     return dest
+
+
+def _zip_dest(name: str, taken_stems: set[str]) -> Path:
+    dest = MUSIC_DIR / name
+    if dest.stem not in taken_stems and not dest.exists():
+        return dest
+    # Keep the filename intact: its stem is also the fallback track title.
+    for n in itertools.count(2):
+        folder = MUSIC_DIR / f"{dest.stem}-{n}"
+        try:
+            folder.mkdir()
+        except FileExistsError:
+            continue
+        return folder / name
 
 
 _MAX_ZIP_TOTAL = 5 * 1024 * 1024 * 1024   # 5 GB extracted per ZIP
@@ -818,7 +834,7 @@ _MAX_ZIP_FILE = 300 * 1024 * 1024         # 300 MB per file inside a ZIP
 
 
 def _save_zip(fh) -> int:
-    """Save audio and its same-folder lyrics as flat files. Return the audio count."""
+    """Save audio and its same-folder lyrics together. Return the audio count."""
     saved = 0
     extracted = 0
     try:
@@ -826,19 +842,17 @@ def _save_zip(fh) -> int:
     except zipfile.BadZipFile:
         return 0
 
-    def save_member(info: zipfile.ZipInfo, dests: list[Path]) -> bool:
+    def read_member(info: zipfile.ZipInfo, copies: int = 1) -> bytes | None:
         nonlocal extracted
         size = info.file_size
-        if not dests or size > _MAX_ZIP_FILE or extracted + size * len(dests) > _MAX_ZIP_TOTAL:
-            return False
+        if not copies or size > _MAX_ZIP_FILE or extracted + size * copies > _MAX_ZIP_TOTAL:
+            return None
         try:
             data = archive.read(info)
         except Exception:
-            return False
-        for dest in dests:
-            dest.write_bytes(data)
-        extracted += len(data) * len(dests)
-        return True
+            return None
+        extracted += len(data) * copies
+        return data
 
     sidecar_exts = {".lrc", ".txt"}
     supported_exts = AUDIO_EXTS | sidecar_exts
@@ -861,16 +875,23 @@ def _save_zip(fh) -> int:
             key = path.with_suffix("")
             if suffix in sidecar_exts:
                 sidecars.append((info, key, suffix))
-            else:
-                dest = _unique_dest(base, taken_stems=taken_stems)
-                if save_member(info, [dest]):
-                    audio_dests.setdefault(key, []).append(dest)
-                    taken_stems.add(dest.stem)
-                    saved += 1
+                continue
+            data = read_member(info)
+            if data is None:
+                continue
+            dest = _zip_dest(base, taken_stems)
+            dest.write_bytes(data)
+            audio_dests.setdefault(key, []).append(dest)
+            taken_stems.add(dest.stem)
+            saved += 1
 
         for info, key, suffix in sidecars:
             dests = [audio.with_suffix(suffix) for audio in audio_dests.get(key, [])]
-            save_member(info, [dest for dest in dests if not dest.exists()])
+            unwritten = [dest for dest in dests if not dest.exists()]
+            data = read_member(info, len(unwritten))
+            if data is not None:
+                for dest in unwritten:
+                    dest.write_bytes(data)
     return saved
 
 

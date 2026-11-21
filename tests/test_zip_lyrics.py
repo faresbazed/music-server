@@ -5,13 +5,17 @@ import zipfile
 import pytest
 
 
-@pytest.fixture
-def wav():
+def make_wav(seconds):
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as audio:
         audio.setparams((1, 2, 8000, 0, "NONE", "not compressed"))
-        audio.writeframes(b"\0\0" * 800)
+        audio.writeframes(b"\0\0" * int(8000 * seconds))
     return buffer.getvalue()
+
+
+@pytest.fixture
+def wav():
+    return make_wav(0.1)
 
 
 def upload_zip(client, auth_headers, entries, saved, tracks):
@@ -58,7 +62,7 @@ def test_zip_keeps_lyrics_with_their_album(
     upload_zip(client, auth_headers, entries, saved=2, tracks=2)
 
     assert lyrics_for("Repeat.wav") == {"plain": None, "synced": None, "source": "none"}
-    assert lyrics_for(f"Repeat-2{audio_ext}") == {
+    assert lyrics_for(f"Repeat-2/Repeat{audio_ext}") == {
         "plain": "Album B lyrics",
         "synced": synced,
         "source": "sidecar",
@@ -73,7 +77,7 @@ def test_zip_does_not_overwrite_lyrics_on_repeat_upload(client, auth_headers, wa
         )
 
     assert lyrics_for("Repeat.wav")["plain"] == "Original lyrics"
-    assert lyrics_for("Repeat-2.wav")["plain"] == "New lyrics"
+    assert lyrics_for("Repeat-2/Repeat.wav")["plain"] == "New lyrics"
 
 
 def test_zip_skips_sidecars_without_audio_in_the_same_folder(
@@ -85,3 +89,18 @@ def test_zip_skips_sidecars_without_audio_in_the_same_folder(
     )
 
     assert lyrics_for("Repeat.wav")["source"] == "none"
+
+
+def test_zip_keeps_filename_title_for_playlist_matching(client, auth_headers, wav):
+    upload_zip(
+        client, auth_headers,
+        [("AlbumA/Repeat.wav", wav), ("AlbumB/Repeat.WAV", make_wav(5))],
+        saved=2, tracks=2,
+    )
+
+    response = client.post(
+        "/api/import/json", headers=auth_headers,
+        json={"name": "Album B", "tracks": [{"title": "Repeat", "duration_ms": 5000}]},
+    )
+    assert response.status_code == 200
+    assert response.get_json()["report"]["matched"] == 1
