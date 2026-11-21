@@ -34,19 +34,17 @@ import unicodedata
 import zipfile
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
+from typing import BinaryIO
 from urllib.parse import quote, urlencode
 
+import mutagen
 import requests
 from flask import (Flask, abort, jsonify, make_response, request,
                    send_file)
+from mutagen.aac import AAC
+from mutagen.apev2 import APEv2File
+from mutagen.id3 import ID3FileType
 from werkzeug.utils import secure_filename
-
-try:
-    import mutagen
-    from mutagen.id3 import ID3
-except Exception:  # pragma: no cover - mutagen is a hard dependency in prod
-    mutagen = None
-    ID3 = None
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -268,16 +266,47 @@ def _extract_artwork(audio, tags) -> bytes | None:
     return None
 
 
-def _extract_metadata(path: Path) -> dict:
+def _probe_audio(filename: str, stream: BinaryIO) -> tuple[bool, mutagen.FileType | None]:
+    try:
+        audio = mutagen.File(filename=filename, fileobj=stream)
+    except Exception:
+        audio = None
+    if audio is not None and audio.info is not None and type(audio) not in (APEv2File, ID3FileType):
+        return True, audio
+    suffix = Path(filename).suffix.lower()
+    if suffix == ".aac":
+        # Mutagen's autodetection can mistake ID3-prefixed ADTS for MP3.
+        try:
+            stream.seek(0)
+            return True, AAC(filename=filename, fileobj=stream)
+        except Exception:
+            pass
+    elif suffix == ".wav":
+        # Extended WAVE containers are valid audio but not supported by Mutagen.
+        stream.seek(0)
+        header = stream.read(40)
+        rf64 = header[:4] in (b"RF64", b"BW64") and header[4:16] == b"\xff\xff\xff\xffWAVEds64"
+        rifx = header[:4] == b"RIFX" and header[8:12] == b"WAVE"
+        # Wave64 uses two 16-byte GUIDs separated by an 8-byte size.
+        wave64 = (
+            header[:16] == b"riff.\x91\xcf\x11\xa5\xd6(\xdb\x04\xc1\x00\x00"
+            and header[24:40] == b"wave\xf3\xac\xd3\x11\x8c\xd1\x00\xc0O\x8e\xdb\x8a"
+        )
+        if rf64 or rifx or wave64:
+            return True, None
+    return False, None
+
+
+def _extract_metadata(path: Path) -> dict | None:
+    try:
+        with path.open("rb") as stream:
+            valid, audio = _probe_audio(str(path), stream)
+    except OSError:
+        return None
+    if not valid:
+        return None
     meta = {"title": None, "artist": None, "album": None,
             "duration_sec": None, "lyrics": None, "artwork": None}
-    if mutagen is None:
-        return meta
-    try:
-        audio = mutagen.File(str(path))
-    except Exception as exc:
-        print(f"[music-server] mutagen failed on {path.name}: {exc}", flush=True)
-        return meta
     if audio is None:
         return meta
     try:
@@ -367,9 +396,11 @@ def scan_library() -> int:
     else:
         paths = []
     for path in paths:
+        meta = _extract_metadata(path)
+        if meta is None:
+            continue
         rel = str(path.relative_to(MUSIC_DIR))
         tid = track_id_for_rel(rel)
-        meta = _extract_metadata(path)
         art_path = None
         if meta["artwork"]:
             art_path = ART_DIR / f"{tid}.jpg"
@@ -904,13 +935,13 @@ def _save_zip(fh) -> int:
         audio_dests: dict[PurePosixPath, list[Path]] = {}
         sidecars: dict[PurePosixPath, list[tuple[zipfile.ZipInfo, str]]] = {}
         for info in archive.infolist():
-            if info.is_dir():
+            path = PurePosixPath(info.filename.replace("\\", "/"))
+            if info.is_dir() or "__MACOSX" in path.parts[:-1]:
                 continue
             base = _upload_filename(info.filename)
             suffix = Path(base).suffix.lower()
             if suffix not in supported_exts:
                 continue
-            path = PurePosixPath(info.filename.replace("\\", "/"))
             key = path.with_suffix("")
             if suffix in sidecar_exts:
                 sidecars.setdefault(key, []).append((info, suffix))
@@ -919,6 +950,10 @@ def _save_zip(fh) -> int:
             dests = audio_dests.setdefault(key, [])
             data = read_member(info)
             if data is None:
+                continue
+            valid, _ = _probe_audio(base, io.BytesIO(data))
+            if not valid:
+                del data
                 continue
             dest = _zip_dest(base, taken_stems)
             dest.write_bytes(data)
@@ -964,6 +999,10 @@ def upload_files():
         name = _upload_filename(raw_name)
         if not name or Path(name).suffix.lower() not in AUDIO_EXTS:
             continue
+        valid, _ = _probe_audio(name, fh.stream)
+        if not valid:
+            continue
+        fh.stream.seek(0)
         fh.save(str(_unique_dest(name)))
         saved += 1
     total = scan_library()

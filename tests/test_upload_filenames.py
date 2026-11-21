@@ -84,3 +84,29 @@ def test_invalid_zip(client, data_dir, auth_headers):
     assert response.status_code == 200
     assert response.get_json()["saved"] == 0
     assert list((data_dir / "music").iterdir()) == []
+
+
+def test_direct_upload_skips_text_named_mp3(client, data_dir, auth_headers):
+    response = client.post(
+        "/upload?format=json",
+        headers=auth_headers,
+        data={"files": (io.BytesIO(b"Not audio"), "Fake.mp3")},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "saved": 0, "tracks": 0}
+    assert list((data_dir / "music").iterdir()) == []
+
+
+def test_startup_scan_excludes_previously_saved_junk(app_factory, data_dir, auth_headers):
+    app_factory()
+    music_dir = data_dir / "music"
+    (music_dir / "Song.wav").write_bytes(wav_bytes())
+    (music_dir / "_Song.wav").write_bytes(b"\x00\x05\x16\x07AppleDouble metadata")
+    (music_dir / "Fake.mp3").write_text("Not audio", encoding="utf-8")
+
+    client = app_factory().test_client()
+    response = client.get("/api/catalog", headers=auth_headers)
+
+    assert response.status_code == 200
+    assert [track["title"] for track in response.get_json()["library"]] == ["Song"]

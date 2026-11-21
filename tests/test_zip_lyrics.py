@@ -1,9 +1,11 @@
 import io
+import struct
 import wave
 import zipfile
+from pathlib import Path
 
 import pytest
-from mutagen.id3 import TPE1
+from mutagen.id3 import ID3, TIT2, TPE1
 from mutagen.wave import WAVE
 
 
@@ -91,6 +93,76 @@ def test_zip_skips_sidecars_without_audio_in_the_same_folder(
     )
 
     assert lyrics_for("Repeat.wav")["source"] == "none"
+
+
+def test_zip_skips_macos_metadata(client, auth_headers, data_dir, wav, lyrics_for):
+    upload_zip(
+        client, auth_headers,
+        [
+            ("Album/Song.wav", wav),
+            ("Album/Song.txt", "Real lyrics"),
+            ("__MACOSX/Album/._Song.wav", b"\x00\x05\x16\x07AppleDouble metadata"),
+            ("Wrapped\\__MACOSX\\Album\\Song.wav", wav),
+            ("Album/._Bonus.wav", wav),
+        ],
+        saved=2, tracks=2,
+    )
+
+    assert sorted(path.name for path in (data_dir / "music").rglob("*") if path.is_file()) == [
+        "Song.txt", "Song.wav", "_Bonus.wav",
+    ]
+    assert lyrics_for("Song.wav")["plain"] == "Real lyrics"
+
+
+def test_zip_skips_text_named_mp3(client, auth_headers, data_dir, wav):
+    upload_zip(
+        client, auth_headers,
+        [("Fake.mp3", "Not audio"), ("Fake.lrc", "Orphan lyrics"), ("Song.wav", wav)],
+        saved=1, tracks=1,
+    )
+
+    assert [path.name for path in (data_dir / "music").iterdir()] == ["Song.wav"]
+
+
+@pytest.mark.parametrize("tagged", [False, True], ids=["raw", "id3-prefixed"])
+def test_zip_keeps_adts_aac(client, auth_headers, data_dir, tagged):
+    silence = (Path(__file__).parent / "fixtures" / "silence.aac").read_bytes()
+    if tagged:
+        stream = io.BytesIO(silence)
+        tags = ID3()
+        tags.add(TIT2(encoding=3, text=["Silence"]))
+        tags.save(stream)
+        silence = stream.getvalue()
+
+    upload_zip(client, auth_headers, [("Song.aac", silence)], saved=1, tracks=1)
+
+    assert (data_dir / "music" / "Song.aac").read_bytes() == silence
+    response = client.get("/api/catalog", headers=auth_headers)
+    track, = response.get_json()["library"]
+    assert track["duration_sec"] is not None
+    assert track["duration_sec"] > 0
+    assert client.get(f"/api/stream/{track['id']}", headers=auth_headers).data == silence
+
+
+@pytest.mark.parametrize("magic", [b"RF64", b"BW64", b"RIFX", b"riff"])
+def test_zip_keeps_extended_wave(client, auth_headers, wav, magic):
+    frames = wav[44:]
+    if magic == b"riff":
+        audio = (Path(__file__).parent / "fixtures" / "silence.w64").read_bytes()
+    elif magic == b"RIFX":
+        fmt = struct.pack(">IHHIIHH", 16, 1, 1, 8000, 16000, 2, 16)
+        audio = b"RIFX" + struct.pack(">I", len(wav) - 8) + b"WAVEfmt " + fmt
+        audio += b"data" + struct.pack(">I", len(frames)) + frames
+    else:
+        # RF64 and BW64 store 64-bit RIFF and data sizes in the ds64 chunk.
+        ds64 = b"ds64" + struct.pack("<IQQQI", 28, len(wav) + 28, len(frames), len(frames) // 2, 0)
+        audio = magic + b"\xff" * 4 + b"WAVE" + ds64 + wav[12:40] + b"\xff" * 4 + frames
+
+    upload_zip(client, auth_headers, [("Song.wav", audio)], saved=1, tracks=1)
+
+    response = client.get("/api/catalog", headers=auth_headers)
+    track, = response.get_json()["library"]
+    assert client.get(f"/api/stream/{track['id']}", headers=auth_headers).data == audio
 
 
 def test_zip_matches_unicode_paths_with_different_separators(
