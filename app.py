@@ -870,6 +870,9 @@ def _save_zip(fh) -> int:
         extracted += len(data) * copies
         return data
 
+    def normalized_stem(key: PurePosixPath) -> tuple[PurePosixPath, str]:
+        return key.parent, unicodedata.normalize("NFC", key.name)
+
     sidecar_exts = {".lrc", ".txt"}
     supported_exts = AUDIO_EXTS | sidecar_exts
     with archive:
@@ -902,8 +905,19 @@ def _save_zip(fh) -> int:
             taken_stems.add(dest.stem)
             saved += 1
 
+        aliases: dict[tuple[PurePosixPath, str], list[PurePosixPath]] = {}
+        for key in audio_dests:
+            aliases.setdefault(normalized_stem(key), []).append(key)
+
+        # Exact matches claim their sidecars before any Unicode fallback.
+        sidecars.sort(key=lambda sidecar: sidecar[1] not in audio_dests)
         for info, key, suffix in sidecars:
-            dests = [audio.with_suffix(suffix) for audio in audio_dests.get(key, [])]
+            if key not in audio_dests:
+                candidates = aliases.get(normalized_stem(key), [])
+                if len(candidates) != 1:
+                    continue
+                key, = candidates
+            dests = [audio.with_suffix(suffix) for audio in audio_dests[key]]
             unwritten = [dest for dest in dests if not dest.exists()]
             data = read_member(info, len(unwritten))
             if data is not None:

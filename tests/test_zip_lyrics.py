@@ -123,6 +123,31 @@ def test_zip_keeps_unicode_equivalent_folders_separate(
     assert lyrics_for("Repeat-2/Repeat.wav")["plain"] == "Second album"
 
 
+@pytest.mark.parametrize("exact_lyrics", [None, "Exact lyrics"])
+def test_zip_matches_unambiguous_unicode_stem(
+    client, auth_headers, wav, lyrics_for, exact_lyrics
+):
+    entries = [("Album/cafe\u0301.wav", wav), ("Album/café.txt", "Fallback lyrics")]
+    if exact_lyrics:
+        entries.append(("Album/cafe\u0301.txt", exact_lyrics))
+    upload_zip(client, auth_headers, entries, saved=1, tracks=1)
+
+    assert lyrics_for("café.wav")["plain"] == (exact_lyrics or "Fallback lyrics")
+
+
+def test_zip_does_not_guess_among_unicode_stem_matches(
+    client, auth_headers, wav, lyrics_for
+):
+    upload_zip(
+        client, auth_headers,
+        [("Album/ǻ.wav", wav), ("Album/å\u0301.wav", wav), ("Album/a\u030a\u0301.txt", "Ambiguous")],
+        saved=2, tracks=2,
+    )
+
+    assert lyrics_for("ǻ.wav")["source"] == "none"
+    assert lyrics_for("ǻ-2/ǻ.wav")["source"] == "none"
+
+
 def test_zip_keeps_filename_title_for_playlist_matching(client, auth_headers, wav):
     upload_zip(
         client, auth_headers,
