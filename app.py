@@ -28,6 +28,7 @@ import os
 import re
 import secrets
 import string
+import tempfile
 import threading
 import time
 import unicodedata
@@ -120,13 +121,23 @@ def _json_load(path: Path, default):
 
 
 def _json_save(path: Path, obj) -> None:
+    tmp = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=1), encoding="utf-8")
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                         dir=path.parent, prefix=path.name + ".",
+                                         suffix=".tmp", delete=False) as handle:
+            tmp = Path(handle.name)
+            handle.write(json.dumps(obj, ensure_ascii=False, indent=1))
         tmp.replace(path)
     except OSError as exc:
         print(f"[music-server] cache write failed {path}: {exc}", flush=True)
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _duration_ms(value, *, scale=1) -> int | None:
@@ -365,14 +376,17 @@ SEED_PLAYLISTS = SEED.get("playlists", []) if isinstance(SEED, dict) else []
 _imported_doc = _json_load(IMPORTED_PATH, {"playlists": []})
 IMPORTED_PLAYLISTS = (_imported_doc.get("playlists", [])
                       if isinstance(_imported_doc, dict) else [])
+_imported_lock = threading.RLock()
 
 
 def _save_imported() -> None:
-    _json_save(IMPORTED_PATH, {"playlists": IMPORTED_PLAYLISTS})
+    with _imported_lock:
+        _json_save(IMPORTED_PATH, {"playlists": IMPORTED_PLAYLISTS})
 
 
 def _all_playlists() -> list:
-    return list(SEED_PLAYLISTS) + list(IMPORTED_PLAYLISTS)
+    with _imported_lock:
+        return list(SEED_PLAYLISTS) + list(IMPORTED_PLAYLISTS)
 
 _index_lock = threading.RLock()
 _FILES: dict[str, dict] = {}   # id -> record (record includes private keys)
@@ -1184,13 +1198,14 @@ def _add_imported_playlist(name: str, tracks: list, spotify_url=None,
           "tracks": [t for t in tracks if t]}
     key_url = spotify_url or ""
     key_name = _norm(pl["name"])
-    kept = [p for p in IMPORTED_PLAYLISTS
-            if not ((key_url and p.get("spotify_url") == key_url)
-                    or _norm(p.get("name")) == key_name)]
-    kept.append(pl)
-    IMPORTED_PLAYLISTS.clear()
-    IMPORTED_PLAYLISTS.extend(kept)
-    _save_imported()
+    with _imported_lock:
+        kept = [p for p in IMPORTED_PLAYLISTS
+                if not ((key_url and p.get("spotify_url") == key_url)
+                        or _norm(p.get("name")) == key_name)]
+        kept.append(pl)
+        IMPORTED_PLAYLISTS.clear()
+        IMPORTED_PLAYLISTS.extend(kept)
+        _save_imported()
     return pl
 
 
