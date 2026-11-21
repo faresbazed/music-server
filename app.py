@@ -1037,7 +1037,8 @@ def _parse_import_file(data: bytes, filename: str) -> list:
                                                            errors="replace"))))
         tracks = [t for t in (_norm_track(r) for r in rows) if t]
         name = Path(filename or "Imported playlist").stem
-        return [{"name": name, "spotify_url": None, "tracks": tracks}] if tracks else []
+        return ([{"name": name, "spotify_url": None, "tracks": tracks}]
+                if tracks else [])
     doc = json.loads(data.decode("utf-8-sig", errors="replace"))
     if isinstance(doc, list):
         doc = {"name": Path(filename or "Imported playlist").stem,
@@ -1248,9 +1249,9 @@ def import_submit():
             if not pid:
                 raise ValueError("bad_spotify_url: paste a playlist link")
             fetched = _spotify_fetch_playlist(pid)
-            pl = _add_imported_playlist(fetched["name"], fetched["tracks"],
-                                         spotify_url=fetched.get("spotify_url"),
-                                         source="spotify")
+            playlists.append(_add_imported_playlist(
+                fetched["name"], fetched["tracks"],
+                spotify_url=fetched.get("spotify_url"), source="spotify"))
         elif mode == "file":
             fh = request.files.get("file")
             if fh is None or not fh.filename:
@@ -1266,16 +1267,14 @@ def import_submit():
             tracks = _parse_track_text(request.form.get("text") or "")
             if not tracks:
                 raise ValueError("no_tracks: one per line, Title | Artist")
-            pl = _add_imported_playlist(
+            playlists.append(_add_imported_playlist(
                 request.form.get("name") or "Imported playlist", tracks,
-                source="text")
+                source="text"))
     except Exception as exc:
         return make_response(
             "<!doctype html><title>Import failed</title>"
             f"<p>Import failed: {html_mod.escape(str(exc))}</p>"
             '<p><a href="/import">Back</a></p>'), 400
-    if mode != "file":
-        playlists.append(pl)
     sections = []
     for pl in playlists:
         rep = _playlist_report(pl)
