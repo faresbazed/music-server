@@ -2,7 +2,7 @@ import io
 import json
 import unicodedata
 import zipfile
-from urllib.parse import unquote
+from urllib.parse import quote
 
 import pytest
 from werkzeug.http import parse_options_header
@@ -10,13 +10,18 @@ from werkzeug.http import parse_options_header
 from test_upload_filenames import wav_bytes
 
 
-def test_arabic_playlist_download(client, auth_headers):
+@pytest.mark.parametrize(
+    ("name", "ascii_name"),
+    [("أغاني عمرو", "playlist"), ("أغاني Road Trip", "Road_Trip"), ("Road Trip", "Road_Trip")],
+    ids=["arabic", "mixed", "ascii"],
+)
+def test_arabic_playlist_download(client, auth_headers, name, ascii_name):
     response = client.post(
         "/upload?format=json", headers=auth_headers,
         data={"files": (io.BytesIO(wav_bytes()), "عمرو.wav")},
     )
     assert response.get_json()["saved"] == 1
-    playlist = {"name": "أغاني عمرو", "tracks": [{"title": "عمرو", "duration_ms": 10}]}
+    playlist = {"name": name, "tracks": [{"title": "عمرو", "duration_ms": 10}]}
     response = client.post(
         "/import", headers=auth_headers,
         data={"mode": "file", "file": (io.BytesIO(json.dumps(playlist).encode()), "list.json")},
@@ -27,8 +32,13 @@ def test_arabic_playlist_download(client, auth_headers):
         headers=auth_headers,
     )
     assert response.status_code == 200
-    assert "filename*=UTF-8''" in response.headers["Content-Disposition"]
-    assert unquote(response.headers["Content-Disposition"].split("filename*=UTF-8''")[1]) == "أغاني عمرو.zip"
+    disposition = response.headers["Content-Disposition"]
+    ascii_disposition = disposition.split("; filename*=", 1)[0]
+    assert parse_options_header(ascii_disposition)[1]["filename"] == f"{ascii_name}.zip"
+    if not name.isascii():
+        assert disposition.split("; filename*=", 1)[1] == "UTF-8''" + quote(f"{name}.zip", safe="")
+    else:
+        assert "filename*=" not in disposition
     with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
         assert archive.namelist() == ["001 - عمرو.wav", "playlist.m3u"]
         assert archive.read("playlist.m3u").decode() == "#EXTM3U\n001 - عمرو.wav\n"

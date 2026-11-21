@@ -32,11 +32,12 @@ import time
 import unicodedata
 import zipfile
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import requests
 from flask import (Flask, abort, jsonify, make_response, request,
                    send_file)
+from werkzeug.utils import secure_filename
 
 try:
     import mutagen
@@ -1213,8 +1214,16 @@ def download_playlist():
                                   "uploaded to this server yet"}), 404
     buf.seek(0)
     safe = _download_filename(pl.get("name") or "", "playlist")
-    return send_file(buf, mimetype="application/zip", as_attachment=True,
-                     download_name=f"{safe}.zip")
+    ascii_name = secure_filename(safe)
+    if not re.search(r"[A-Za-z0-9]", ascii_name):
+        ascii_name = "playlist"
+    response = send_file(buf, mimetype="application/zip", as_attachment=True,
+                         download_name=f"{ascii_name}.zip")
+    if not safe.isascii():
+        response.headers.set(
+            "Content-Disposition", "attachment", filename=f"{ascii_name}.zip",
+            **{"filename*": "UTF-8''" + quote(f"{safe}.zip", safe="")})
+    return response
 
 
 _IMPORT_TOKEN_PAGE = _UPLOAD_TOKEN_PAGE.replace('action="/upload"',
