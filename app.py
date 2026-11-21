@@ -459,15 +459,14 @@ def itunes_lookup(artist: str, title: str):
                                  "limit": 1})
         if resp.status_code != 200:
             return None
-        if resp.status_code == 200:
-            items = resp.json().get("results") or []
-            if items:
-                item = items[0]
-                art = item.get("artworkUrl100")
-                if art:
-                    art = re.sub(r"/\d+x\d+bb\.(jpg|png)", "/600x600bb.jpg", art)
-                result = {"album": item.get("collectionName"),
-                          "artwork_url": art}
+        items = resp.json().get("results") or []
+        if items:
+            item = items[0]
+            art = item.get("artworkUrl100")
+            if art:
+                art = re.sub(r"/\d+x\d+bb\.(jpg|png)", "/600x600bb.jpg", art)
+            result = {"album": item.get("collectionName"),
+                      "artwork_url": art}
     except Exception as exc:
         print(f"[music-server] iTunes lookup failed ({artist} - {title}): {exc}",
               flush=True)
@@ -503,12 +502,10 @@ def lrclib_lookup(rec: dict):
                               params={"artist_name": artist, "track_name": title})
             if resp2.status_code != 200:
                 return found
-            if resp2.status_code == 200:
-                results = resp2.json() or []
-                for item in results:
-                    if item.get("plainLyrics") or item.get("syncedLyrics"):
-                        data = item
-                        break
+            for item in resp2.json() or []:
+                if item.get("plainLyrics") or item.get("syncedLyrics"):
+                    data = item
+                    break
         if data and (data.get("plainLyrics") or data.get("syncedLyrics")):
             found = {"plain": data.get("plainLyrics"),
                      "synced": data.get("syncedLyrics"),
