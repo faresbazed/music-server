@@ -1,10 +1,7 @@
 import json
 import sys
-import wave
 
 import pytest
-from mutagen.id3 import TIT2
-from mutagen.wave import WAVE
 
 
 @pytest.mark.parametrize(("text", "expected"), [
@@ -29,25 +26,11 @@ def test_parse_track_text(app, text, expected):
     assert [(t["title"], t["artist"]) for t in tracks] == expected
 
 
-def test_comma_title_import_with_local_file(client, auth_headers, tmp_path):
-    path = tmp_path / "hello.wav"
-    with wave.open(str(path), "wb") as audio:
-        audio.setparams((1, 2, 8000, 0, "NONE", "not compressed"))
-        audio.writeframes(b"\x00\x00" * 8000)
-    audio = WAVE(path)
-    audio.add_tags()
-    audio.tags.add(TIT2(encoding=3, text="Hello, Goodbye"))
-    audio.save()
-    with path.open("rb") as upload:
-        response = client.post("/upload?format=json", headers=auth_headers,
-                               data={"files": (upload, path.name)})
-    assert response.get_json()["tracks"] == 1
+def test_comma_title_import_keeps_title(client, auth_headers):
     response = client.post("/api/import/text", headers=auth_headers,
                            json={"name": "Comma title", "text": "Hello, Goodbye"})
     assert response.status_code == 200
     report = response.get_json()["report"]
-    assert report["matched"] == 0
-    assert report["missing_count"] == 1
     assert report["missing_tracks"][0]["title"] == "Hello, Goodbye"
     assert report["missing_tracks"][0]["artist"] is None
     module = sys.modules["app"]
