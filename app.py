@@ -163,8 +163,7 @@ _ARTIST_FILLER = frozenset({"the", "and", "feat", "ft", "featuring"})
 def _artist_match_score(a: str, b: str) -> int:
     """0 = no match; higher = stronger (exact > spelling variant > substring > shared word)."""
     na, nb = _norm(a), _norm(b)
-    filler = _ARTIST_FILLER
-    if not (set(na.split()) - filler) or not (set(nb.split()) - filler):
+    if not (set(na.split()) - _ARTIST_FILLER) or not (set(nb.split()) - _ARTIST_FILLER):
         return 0
     if na == nb:
         return 4
@@ -173,7 +172,7 @@ def _artist_match_score(a: str, b: str) -> int:
         return 3
     if na in nb or nb in na or ca in cb or cb in ca:
         return 2
-    return int(bool((set(na.split()) & set(nb.split())) - filler))
+    return int(bool((set(na.split()) & set(nb.split())) - _ARTIST_FILLER))
 
 
 def _artists_match(a: str, b: str) -> bool:
