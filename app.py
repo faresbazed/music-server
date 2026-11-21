@@ -284,9 +284,15 @@ def _probe_audio(filename: str, stream: BinaryIO) -> tuple[bool, mutagen.FileTyp
     elif suffix == ".wav":
         # Extended WAVE containers are valid audio but not supported by Mutagen.
         stream.seek(0)
-        header = stream.read(16)
-        if (header[:4] in (b"RF64", b"BW64") and header[4:] == b"\xff\xff\xff\xffWAVEds64"
-                or header[:4] == b"RIFX" and header[8:12] == b"WAVE"):
+        header = stream.read(40)
+        rf64 = header[:4] in (b"RF64", b"BW64") and header[4:16] == b"\xff\xff\xff\xffWAVEds64"
+        rifx = header[:4] == b"RIFX" and header[8:12] == b"WAVE"
+        # Wave64 uses two 16-byte GUIDs separated by an 8-byte size.
+        wave64 = (
+            header[:16] == b"riff.\x91\xcf\x11\xa5\xd6(\xdb\x04\xc1\x00\x00"
+            and header[24:40] == b"wave\xf3\xac\xd3\x11\x8c\xd1\x00\xc0O\x8e\xdb\x8a"
+        )
+        if rf64 or rifx or wave64:
             return True, None
     return False, None
 

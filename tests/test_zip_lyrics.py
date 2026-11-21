@@ -144,10 +144,12 @@ def test_zip_keeps_adts_aac(client, auth_headers, data_dir, tagged):
     assert client.get(f"/api/stream/{track['id']}", headers=auth_headers).data == silence
 
 
-@pytest.mark.parametrize("magic", [b"RF64", b"BW64", b"RIFX"])
+@pytest.mark.parametrize("magic", [b"RF64", b"BW64", b"RIFX", b"riff"])
 def test_zip_keeps_extended_wave(client, auth_headers, wav, magic):
     frames = wav[44:]
-    if magic == b"RIFX":
+    if magic == b"riff":
+        audio = (Path(__file__).parent / "fixtures" / "silence.w64").read_bytes()
+    elif magic == b"RIFX":
         fmt = struct.pack(">IHHIIHH", 16, 1, 1, 8000, 16000, 2, 16)
         audio = b"RIFX" + struct.pack(">I", len(wav) - 8) + b"WAVEfmt " + fmt
         audio += b"data" + struct.pack(">I", len(frames)) + frames
