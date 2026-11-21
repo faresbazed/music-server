@@ -803,6 +803,12 @@ def upload_page():
     return resp
 
 
+def _upload_filename(name: str) -> str:
+    name = re.split(r"[/\\]", name)[-1]
+    name = "".join(char for char in name if not unicodedata.category(char).startswith("C"))
+    return re.sub(r"^[.\s]+", "", unicodedata.normalize("NFC", name))
+
+
 def _unique_dest(name: str) -> Path:
     dest = MUSIC_DIR / name
     if dest.exists():
@@ -836,7 +842,7 @@ def _save_zip(fh) -> int:
     for info in zf.infolist():
         if info.is_dir():
             continue
-        base = secure_filename(Path(info.filename).name)
+        base = _upload_filename(info.filename)
         if not base:
             continue
         suffix = Path(base).suffix.lower()
@@ -873,7 +879,7 @@ def upload_files():
         if Path(raw_name).suffix.lower() == ".zip":
             saved += _save_zip(fh)
             continue
-        name = secure_filename(Path(raw_name).name)
+        name = _upload_filename(raw_name)
         if not name or Path(name).suffix.lower() not in AUDIO_EXTS:
             continue
         fh.save(str(_unique_dest(name)))
