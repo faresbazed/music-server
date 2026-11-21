@@ -128,6 +128,16 @@ def _json_save(path: Path, obj) -> None:
         print(f"[music-server] cache write failed {path}: {exc}", flush=True)
 
 
+def _duration_ms(value, *, scale=1) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        duration = round(float(value) * scale)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return duration if duration > 0 else None
+
+
 def _norm(text) -> str:
     """Normalise a title/artist for matching: lowercase, strip diacritics
     and punctuation, collapse whitespace."""
@@ -395,14 +405,9 @@ def _file_matches_seed(rec: dict, seed_track: dict) -> bool:
     if _artists_match(rec.get("artist") or "", seed_track.get("artist") or ""):
         return True
     # fall back to duration agreement (within 3 seconds)
-    try:
-        dur = rec.get("duration_sec")
-        seed_dur = (seed_track.get("duration_ms") or 0) / 1000.0
-        if dur is not None and seed_dur and abs(float(dur) - seed_dur) <= 3.0:
-            return True
-    except (TypeError, ValueError):
-        pass
-    return False
+    dur = rec.get("duration_sec")
+    seed_ms = _duration_ms(seed_track.get("duration_ms"))
+    return dur is not None and seed_ms is not None and abs(dur - seed_ms / 1000) <= 3.0
 
 
 def _match_file_for_seed(seed_track: dict, records: list[dict]):
@@ -600,15 +605,13 @@ def catalog():
             if rec is not None:
                 tracks.append(_public_track(rec, spotify_url=st.get("spotify_url")))
             else:
-                dur = None
-                if st.get("duration_ms"):
-                    dur = round(st["duration_ms"] / 1000.0, 3)
+                dur_ms = _duration_ms(st.get("duration_ms"))
                 tracks.append({
                     "id": None,
                     "title": st.get("title"),
                     "artist": st.get("artist"),
                     "album": None,
-                    "duration_sec": dur,
+                    "duration_sec": dur_ms / 1000 if dur_ms is not None else None,
                     "ext": None,
                     "has_file": False,
                     "has_artwork": False,
@@ -959,7 +962,7 @@ def _spotify_fetch_playlist(playlist_id: str) -> dict:
         tracks.append({
             "title": tr.get("name"),
             "artist": artists or None,
-            "duration_ms": tr.get("duration_ms"),
+            "duration_ms": _duration_ms(tr.get("duration_ms")),
             "spotify_url": (tr.get("external_urls") or {}).get("spotify"),
             "spotify_uri": tr.get("uri"),
         })
@@ -980,12 +983,10 @@ def _norm_track(raw: dict):
         for a in raw["artists"]:
             parts.append(a.get("name") if isinstance(a, dict) else str(a))
         artist = ", ".join(p for p in parts if p)
-    dur_ms = raw.get("duration_ms")
-    if dur_ms is None and raw.get("duration_sec") is not None:
-        try:
-            dur_ms = int(round(float(raw["duration_sec"]) * 1000))
-        except (TypeError, ValueError):
-            dur_ms = None
+    if raw.get("duration_ms") is not None:
+        dur_ms = _duration_ms(raw["duration_ms"])
+    else:
+        dur_ms = _duration_ms(raw.get("duration_sec"), scale=1000)
     return {"title": str(title), "artist": str(artist) if artist else None,
             "duration_ms": dur_ms,
             "spotify_url": raw.get("spotify_url"),
@@ -1071,7 +1072,7 @@ def _playlist_report(pl: dict) -> dict:
         else:
             missing.append({"title": st.get("title"),
                             "artist": st.get("artist"),
-                            "duration_ms": st.get("duration_ms"),
+                            "duration_ms": _duration_ms(st.get("duration_ms")),
                             "spotify_url": st.get("spotify_url")})
     return {"name": pl.get("name"), "spotify_url": pl.get("spotify_url"),
             "total": len(pl.get("tracks", [])), "matched": len(matched),
