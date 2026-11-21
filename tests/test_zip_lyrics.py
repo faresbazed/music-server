@@ -3,6 +3,8 @@ import wave
 import zipfile
 
 import pytest
+from mutagen.id3 import TPE1
+from mutagen.wave import WAVE
 
 
 def make_wav(seconds):
@@ -116,3 +118,27 @@ def test_zip_keeps_filename_title_for_playlist_matching(client, auth_headers, wa
     )
     assert response.status_code == 200
     assert response.get_json()["report"]["matched"] == 1
+
+
+def test_zip_playlist_prefers_tagged_artist_over_duration(client, auth_headers, wav):
+    buffer = io.BytesIO(wav)
+    tagged = WAVE(buffer)
+    tagged.add_tags()
+    tagged.tags.add(TPE1(encoding=3, text=["Original Artist"]))
+    tagged.save(buffer)
+    original = buffer.getvalue()
+    upload_zip(
+        client, auth_headers, [("AlbumA/Repeat.wav", original), ("AlbumB/Repeat.wav", wav)],
+        saved=2, tracks=2,
+    )
+
+    response = client.post(
+        "/api/import/json", headers=auth_headers,
+        json={"name": "Original", "tracks": [
+            {"title": "Repeat", "artist": "Original Artist", "duration_ms": 100},
+        ]},
+    )
+    assert response.status_code == 200
+    track, = response.get_json()["report"]["matched_tracks"]
+    download = client.get(f"/api/download/{track['id']}", headers=auth_headers)
+    assert download.data == original

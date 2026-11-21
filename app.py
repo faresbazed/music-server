@@ -396,26 +396,32 @@ def scan_library() -> int:
     return len(order)
 
 
-def _file_matches_seed(rec: dict, seed_track: dict) -> bool:
+def _file_match_kind(rec: dict, seed_track: dict) -> str | None:
     ft = _norm(rec.get("title"))
     st = _norm(seed_track.get("title"))
     if not ft or not st:
-        return False
+        return None
     if ft != st and _collapse_repeats(ft) != _collapse_repeats(st):
-        return False
+        return None
     if _artists_match(rec.get("artist") or "", seed_track.get("artist") or ""):
-        return True
+        return "artist"
     # fall back to duration agreement (within 3 seconds)
     dur = rec.get("duration_sec")
     seed_ms = _duration_ms(seed_track.get("duration_ms"))
-    return dur is not None and seed_ms is not None and abs(dur - seed_ms / 1000) <= 3.0
+    if dur is not None and seed_ms is not None and abs(dur - seed_ms / 1000) <= 3.0:
+        return "duration"
+    return None
 
 
 def _match_file_for_seed(seed_track: dict, records: list[dict]):
+    fallback = None
     for rec in records:
-        if _file_matches_seed(rec, seed_track):
+        kind = _file_match_kind(rec, seed_track)
+        if kind == "artist":
             return rec
-    return None
+        if kind == "duration" and fallback is None:
+            fallback = rec
+    return fallback
 
 
 # ---------------------------------------------------------------------------
