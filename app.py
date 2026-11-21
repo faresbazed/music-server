@@ -1030,7 +1030,22 @@ def _parse_track_text(text: str) -> list:
     return tracks
 
 
-def _parse_import_file(data: bytes, filename: str) -> dict:
+def _parse_import_json(body, default_name="Imported playlist") -> list:
+    docs = body.get("playlists") or [body]
+    playlists = []
+    for doc in docs:
+        if not isinstance(doc, dict):
+            continue
+        tracks = [t for t in (_norm_track(r) for r in doc.get("tracks", []))
+                  if t]
+        if tracks:
+            playlists.append({"name": doc.get("name") or default_name,
+                              "spotify_url": doc.get("spotify_url"),
+                              "tracks": tracks})
+    return playlists
+
+
+def _parse_import_file(data: bytes, filename: str) -> list:
     suffix = Path(filename or "").suffix.lower()
     if suffix == ".csv" or (suffix != ".json" and b"," in data[:512]
                             and not data.lstrip().startswith(b"{")):
@@ -1038,17 +1053,13 @@ def _parse_import_file(data: bytes, filename: str) -> dict:
                                                            errors="replace"))))
         tracks = [t for t in (_norm_track(r) for r in rows) if t]
         name = Path(filename or "Imported playlist").stem
-        return {"name": name, "spotify_url": None, "tracks": tracks}
+        return ([{"name": name, "spotify_url": None, "tracks": tracks}]
+                if tracks else [])
     doc = json.loads(data.decode("utf-8-sig", errors="replace"))
-    if isinstance(doc, dict) and isinstance(doc.get("playlists"), list) \
-            and doc["playlists"]:
-        doc = doc["playlists"][0]
     if isinstance(doc, list):
         doc = {"name": Path(filename or "Imported playlist").stem,
                "tracks": doc}
-    tracks = [t for t in (_norm_track(r) for r in doc.get("tracks", [])) if t]
-    return {"name": doc.get("name") or Path(filename or "Imported").stem,
-            "spotify_url": doc.get("spotify_url"), "tracks": tracks}
+    return _parse_import_json(doc, Path(filename or "Imported").stem)
 
 
 def _add_imported_playlist(name: str, tracks: list, spotify_url=None,
@@ -1131,17 +1142,9 @@ def import_text():
 @app.route("/api/import/json", methods=["POST"])
 def import_json():
     body = request.get_json(silent=True) or {}
-    docs = body.get("playlists") or [body]
     reports = []
-    for doc in docs:
-        if not isinstance(doc, dict):
-            continue
-        tracks = [t for t in (_norm_track(r) for r in doc.get("tracks", []))
-                  if t]
-        if not tracks:
-            continue
-        pl = _add_imported_playlist(doc.get("name") or "Imported playlist",
-                                    tracks,
+    for doc in _parse_import_json(body):
+        pl = _add_imported_playlist(doc["name"], doc["tracks"],
                                     spotify_url=doc.get("spotify_url"),
                                     source="json")
         reports.append(_playlist_report(pl))
@@ -1255,50 +1258,57 @@ def import_page():
 @app.route("/import", methods=["POST"])
 def import_submit():
     mode = (request.form.get("mode") or "").strip()
+    playlists = []
     try:
         if mode == "spotify":
             pid = _parse_spotify_playlist_id(request.form.get("url") or "")
             if not pid:
                 raise ValueError("bad_spotify_url: paste a playlist link")
             fetched = _spotify_fetch_playlist(pid)
-            pl = _add_imported_playlist(fetched["name"], fetched["tracks"],
-                                         spotify_url=fetched.get("spotify_url"),
-                                         source="spotify")
+            playlists.append(_add_imported_playlist(
+                fetched["name"], fetched["tracks"],
+                spotify_url=fetched.get("spotify_url"), source="spotify"))
         elif mode == "file":
             fh = request.files.get("file")
             if fh is None or not fh.filename:
                 raise ValueError("no_file: choose a .json or .csv file")
             parsed = _parse_import_file(fh.read(), fh.filename)
-            pl = _add_imported_playlist(parsed["name"], parsed["tracks"],
-                                         spotify_url=parsed.get("spotify_url"),
-                                         source="file")
+            if not parsed:
+                raise ValueError("no_tracks: file contains no tracks")
+            for doc in parsed:
+                playlists.append(_add_imported_playlist(
+                    doc["name"], doc["tracks"],
+                    spotify_url=doc.get("spotify_url"), source="file"))
         else:
             tracks = _parse_track_text(request.form.get("text") or "")
             if not tracks:
                 raise ValueError("no_tracks: one per line, Title | Artist")
-            pl = _add_imported_playlist(
+            playlists.append(_add_imported_playlist(
                 request.form.get("name") or "Imported playlist", tracks,
-                source="text")
+                source="text"))
     except Exception as exc:
         return make_response(
             "<!doctype html><title>Import failed</title>"
             f"<p>Import failed: {html_mod.escape(str(exc))}</p>"
             '<p><a href="/import">Back</a></p>'), 400
-    rep = _playlist_report(pl)
-    missing_html = "".join(
-        f"<li>{html_mod.escape(t.get('title') or '')} - "
-        f"{html_mod.escape(t.get('artist') or '')}</li>"
-        for t in rep["missing_tracks"])
-    name_q = html_mod.escape(pl.get("name") or "", quote=True)
+    sections = []
+    for pl in playlists:
+        rep = _playlist_report(pl)
+        missing_html = "".join(
+            f"<li>{html_mod.escape(t.get('title') or '')} - "
+            f"{html_mod.escape(t.get('artist') or '')}</li>"
+            for t in rep["missing_tracks"])
+        name_q = html_mod.escape(pl.get("name") or "", quote=True)
+        sections.append(
+            f"<h1>{html_mod.escape(pl.get('name') or '')}</h1>"
+            f"<p>{rep['matched']} of {rep['total']} track(s) matched your "
+            f"uploaded files; {rep['missing_count']} missing.</p>"
+            f"<ul>{missing_html}</ul>"
+            f'<p><a href="/api/download-playlist?playlist={name_q}">'
+            "Download ZIP of matched (your) files</a></p>")
     return make_response(
-        "<!doctype html><title>Imported</title>"
-        f"<h1>{html_mod.escape(pl.get('name') or '')}</h1>"
-        f"<p>{rep['matched']} of {rep['total']} track(s) matched your "
-        f"uploaded files; {rep['missing_count']} missing.</p>"
-        f"<ul>{missing_html}</ul>"
-        f'<p><a href="/api/download-playlist?playlist={name_q}">'
-        "Download ZIP of matched (your) files</a> &middot; "
-        '<a href="/import">Import another</a></p>')
+        "<!doctype html><title>Imported</title>" + "".join(sections)
+        + '<p><a href="/import">Import another</a></p>')
 
 
 # ---------------------------------------------------------------------------
