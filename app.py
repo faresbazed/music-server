@@ -887,7 +887,7 @@ def _save_zip(fh) -> int:
             suffix = Path(base).suffix.lower()
             if suffix not in supported_exts:
                 continue
-            path = PurePosixPath(unicodedata.normalize("NFC", info.filename.replace("\\", "/")))
+            path = PurePosixPath(info.filename.replace("\\", "/"))
             key = path.with_suffix("")
             if suffix in sidecar_exts:
                 sidecars.append((info, key, suffix))

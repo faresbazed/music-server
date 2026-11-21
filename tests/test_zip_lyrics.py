@@ -98,11 +98,29 @@ def test_zip_matches_unicode_paths_with_different_separators(
 ):
     upload_zip(
         client, auth_headers,
-        [("Álbum\\cafe\u0301.wav", wav), ("A\u0301lbum/café.txt", "Lyrics")],
+        [("Álbum\\cafe\u0301.wav", wav), ("Álbum/cafe\u0301.txt", "Lyrics")],
         saved=1, tracks=1,
     )
 
     assert lyrics_for("café.wav")["plain"] == "Lyrics"
+
+
+def test_zip_keeps_unicode_equivalent_folders_separate(
+    client, auth_headers, wav, lyrics_for
+):
+    upload_zip(
+        client, auth_headers,
+        [
+            ("Álbum/Repeat.wav", wav),
+            ("A\u0301lbum/Repeat.wav", wav),
+            ("Álbum/Repeat.txt", "First album"),
+            ("A\u0301lbum/Repeat.txt", "Second album"),
+        ],
+        saved=2, tracks=2,
+    )
+
+    assert lyrics_for("Repeat.wav")["plain"] == "First album"
+    assert lyrics_for("Repeat-2/Repeat.wav")["plain"] == "Second album"
 
 
 def test_zip_keeps_filename_title_for_playlist_matching(client, auth_headers, wav):
