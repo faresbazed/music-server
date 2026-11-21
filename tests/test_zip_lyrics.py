@@ -91,6 +91,18 @@ def test_zip_skips_sidecars_without_audio_in_the_same_folder(
     assert lyrics_for("Repeat.wav")["source"] == "none"
 
 
+def test_zip_matches_unicode_paths_with_different_separators(
+    client, auth_headers, wav, lyrics_for
+):
+    upload_zip(
+        client, auth_headers,
+        [("Álbum\\cafe\u0301.wav", wav), ("A\u0301lbum/café.txt", "Lyrics")],
+        saved=1, tracks=1,
+    )
+
+    assert lyrics_for("café.wav")["plain"] == "Lyrics"
+
+
 def test_zip_keeps_filename_title_for_playlist_matching(client, auth_headers, wav):
     upload_zip(
         client, auth_headers,
