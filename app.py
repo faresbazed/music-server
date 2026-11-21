@@ -850,7 +850,7 @@ def _save_zip(fh) -> int:
     saved = 0
     extracted = 0
     try:
-        archive = zipfile.ZipFile(io.BytesIO(fh.read()))
+        archive = zipfile.ZipFile(fh)
     except zipfile.BadZipFile:
         return 0
 
@@ -893,6 +893,7 @@ def _save_zip(fh) -> int:
                 continue
             dest = _zip_dest(base, taken_stems)
             dest.write_bytes(data)
+            del data
             audio_dests.setdefault(key, []).append(dest)
             taken_stems.add(dest.stem)
             saved += 1
@@ -904,6 +905,7 @@ def _save_zip(fh) -> int:
             if data is not None:
                 for dest in unwritten:
                     dest.write_bytes(data)
+                del data
     return saved
 
 
