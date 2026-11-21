@@ -31,7 +31,7 @@ import threading
 import time
 import unicodedata
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import requests
 from flask import (Flask, abort, jsonify, make_response, request,
@@ -803,14 +803,13 @@ def upload_page():
     return resp
 
 
-def _unique_dest(name: str) -> Path:
+def _unique_dest(name: str, *, taken_stems: set[str] | None = None) -> Path:
     dest = MUSIC_DIR / name
-    if dest.exists():
-        stem, suffix = dest.stem, dest.suffix
-        n = 2
-        while dest.exists():
-            dest = MUSIC_DIR / f"{stem}-{n}{suffix}"
-            n += 1
+    stem, suffix = dest.stem, dest.suffix
+    n = 2
+    while dest.exists() or (taken_stems is not None and dest.stem in taken_stems):
+        dest = MUSIC_DIR / f"{stem}-{n}{suffix}"
+        n += 1
     return dest
 
 
@@ -819,46 +818,59 @@ _MAX_ZIP_FILE = 300 * 1024 * 1024         # 300 MB per file inside a ZIP
 
 
 def _save_zip(fh) -> int:
-    """Extract audio files from an uploaded ZIP into MUSIC_DIR (flat).
-
-    Only basenames are used (no path traversal), non-audio entries are
-    skipped (including .lrc/.txt lyrics sidecars, which ARE kept next to
-    nothing - they are saved with their audio-matching basename so the
-    scanner picks them up as sidecars for same-named tracks).
-    Returns the number of audio files saved.
-    """
+    """Save audio and its same-folder lyrics as flat files. Return the audio count."""
     saved = 0
     extracted = 0
     try:
-        zf = zipfile.ZipFile(io.BytesIO(fh.read()))
+        archive = zipfile.ZipFile(io.BytesIO(fh.read()))
     except zipfile.BadZipFile:
         return 0
-    for info in zf.infolist():
-        if info.is_dir():
-            continue
-        base = secure_filename(Path(info.filename).name)
-        if not base:
-            continue
-        suffix = Path(base).suffix.lower()
-        is_audio = suffix in AUDIO_EXTS
-        is_sidecar = suffix in (".lrc", ".txt")
-        if not is_audio and not is_sidecar:
-            continue
-        if info.file_size > _MAX_ZIP_FILE or extracted + info.file_size > _MAX_ZIP_TOTAL:
-            continue
+
+    def save_member(info: zipfile.ZipInfo, dests: list[Path]) -> bool:
+        nonlocal extracted
+        size = info.file_size
+        if not dests or size > _MAX_ZIP_FILE or extracted + size * len(dests) > _MAX_ZIP_TOTAL:
+            return False
         try:
-            data = zf.read(info)
+            data = archive.read(info)
         except Exception:
-            continue
-        extracted += len(data)
-        dest = _unique_dest(base)
-        # A sidecar that collides with an existing sidecar would be renamed
-        # and stop matching its track; skip duplicate sidecars instead.
-        if is_sidecar and (MUSIC_DIR / base).exists():
-            continue
-        dest.write_bytes(data)
-        if is_audio:
-            saved += 1
+            return False
+        for dest in dests:
+            dest.write_bytes(data)
+        extracted += len(data) * len(dests)
+        return True
+
+    sidecar_exts = {".lrc", ".txt"}
+    supported_exts = AUDIO_EXTS | sidecar_exts
+    with archive:
+        # The scanner matches by stem regardless of the audio extension.
+        taken_stems = {
+            path.stem for path in MUSIC_DIR.iterdir()
+            if path.suffix.lower() in supported_exts
+        }
+        audio_dests: dict[PurePosixPath, list[Path]] = {}
+        sidecars: list[tuple[zipfile.ZipInfo, PurePosixPath, str]] = []
+        for info in archive.infolist():
+            if info.is_dir():
+                continue
+            path = PurePosixPath(info.filename)
+            base = secure_filename(path.name)
+            suffix = Path(base).suffix.lower()
+            if suffix not in supported_exts:
+                continue
+            key = path.with_suffix("")
+            if suffix in sidecar_exts:
+                sidecars.append((info, key, suffix))
+            else:
+                dest = _unique_dest(base, taken_stems=taken_stems)
+                if save_member(info, [dest]):
+                    audio_dests.setdefault(key, []).append(dest)
+                    taken_stems.add(dest.stem)
+                    saved += 1
+
+        for info, key, suffix in sidecars:
+            dests = [audio.with_suffix(suffix) for audio in audio_dests.get(key, [])]
+            save_member(info, [dest for dest in dests if not dest.exists()])
     return saved
 
 

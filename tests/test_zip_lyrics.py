@@ -50,7 +50,7 @@ def lyrics_for(client, auth_headers, monkeypatch):
 def test_zip_keeps_lyrics_with_their_album(
     client, auth_headers, wav, lyrics_for, audio_ext, lyrics_ext, lyrics_first
 ):
-    synced = f"[00:00.00]Album B lyrics\n" if lyrics_ext == ".lrc" else None
+    synced = "[00:00.00]Album B lyrics\n" if lyrics_ext == ".lrc" else None
     sidecar = (f"AlbumB/Repeat{lyrics_ext}", synced or "Album B lyrics")
     entries = [("AlbumA/Repeat.wav", wav), (f"AlbumB/Repeat{audio_ext}", wav)]
     entries.insert(0 if lyrics_first else len(entries), sidecar)

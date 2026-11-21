@@ -77,7 +77,7 @@ Send the token as header `X-Library-Token: <token>`, or `?token=<token>`.
 | `GET /api/download-playlist?playlist=<name>` | ZIP of your own matched files for that playlist + `playlist.m3u` + `missing.txt` (404 if nothing matched yet) |
 | `GET /import` | Web playlist-import page (token once, cookie after) |
 | `GET /upload` | Web upload page (asks for the token once, stores a cookie) |
-| `POST /upload` | Multipart upload, field name **`files`** (multiple). Saves flat into the music folder, then rescans. Also accepts **`.zip` files**: audio entries (and `.lrc` lyrics sidecars) are extracted automatically — zip your whole music folder and upload it in one go. Up to 1 GB per request, so split very large libraries into a few ZIPs. |
+| `POST /upload` | Multipart upload, field name **`files`** (multiple). Saves flat into the music folder, then rescans. In **`.zip` files**, `.lrc` and `.txt` lyrics go with audio that has the same filename stem in the same ZIP folder. Up to 1 GB per request, so split very large libraries into a few ZIPs. |
 
 ## Deploy on Railway
 
