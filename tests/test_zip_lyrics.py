@@ -93,6 +93,35 @@ def test_zip_skips_sidecars_without_audio_in_the_same_folder(
     assert lyrics_for("Repeat.wav")["source"] == "none"
 
 
+def test_zip_skips_macos_metadata(client, auth_headers, data_dir, wav, lyrics_for):
+    upload_zip(
+        client, auth_headers,
+        [
+            ("Album/Song.wav", wav),
+            ("Album/Song.txt", "Real lyrics"),
+            ("__MACOSX/Album/._Song.wav", b"\x00\x05\x16\x07AppleDouble metadata"),
+            ("Wrapped\\__MACOSX\\Album\\Song.wav", wav),
+            ("Album/._Bonus.wav", wav),
+        ],
+        saved=2, tracks=2,
+    )
+
+    assert sorted(path.name for path in (data_dir / "music").rglob("*") if path.is_file()) == [
+        "Song.txt", "Song.wav", "_Bonus.wav",
+    ]
+    assert lyrics_for("Song.wav")["plain"] == "Real lyrics"
+
+
+def test_zip_skips_text_named_mp3(client, auth_headers, data_dir, wav):
+    upload_zip(
+        client, auth_headers,
+        [("Fake.mp3", "Not audio"), ("Fake.lrc", "Not lyrics for another track"), ("Song.wav", wav)],
+        saved=1, tracks=1,
+    )
+
+    assert [path.name for path in (data_dir / "music").iterdir()] == ["Song.wav"]
+
+
 def test_zip_matches_unicode_paths_with_different_separators(
     client, auth_headers, wav, lyrics_for
 ):
