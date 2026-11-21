@@ -459,18 +459,20 @@ def itunes_lookup(artist: str, title: str):
         resp = _http_get("https://itunes.apple.com/search",
                          params={"term": f"{artist} {title}", "entity": "song",
                                  "limit": 1})
-        if resp.status_code == 200:
-            items = resp.json().get("results") or []
-            if items:
-                item = items[0]
-                art = item.get("artworkUrl100")
-                if art:
-                    art = re.sub(r"/\d+x\d+bb\.(jpg|png)", "/600x600bb.jpg", art)
-                result = {"album": item.get("collectionName"),
-                          "artwork_url": art}
+        if resp.status_code != 200:
+            return None
+        items = resp.json().get("results") or []
+        if items:
+            item = items[0]
+            art = item.get("artworkUrl100")
+            if art:
+                art = re.sub(r"/\d+x\d+bb\.(jpg|png)", "/600x600bb.jpg", art)
+            result = {"album": item.get("collectionName"),
+                      "artwork_url": art}
     except Exception as exc:
         print(f"[music-server] iTunes lookup failed ({artist} - {title}): {exc}",
               flush=True)
+        return None
     with _cache_lock:
         _enrich_cache[key] = result  # negative results cached too
         _json_save(ENRICH_CACHE_PATH, _enrich_cache)
@@ -492,18 +494,20 @@ def lrclib_lookup(rec: dict):
         if rec.get("duration_sec"):
             params["duration"] = int(round(rec["duration_sec"]))
         resp = _http_get("https://lrclib.net/api/get", params=params)
+        if resp.status_code not in (200, 404):
+            return found
         data = None
         if resp.status_code == 200:
             data = resp.json()
         if not data or not (data.get("plainLyrics") or data.get("syncedLyrics")):
             resp2 = _http_get("https://lrclib.net/api/search",
                               params={"artist_name": artist, "track_name": title})
-            if resp2.status_code == 200:
-                results = resp2.json() or []
-                for item in results:
-                    if item.get("plainLyrics") or item.get("syncedLyrics"):
-                        data = item
-                        break
+            if resp2.status_code != 200:
+                return found
+            for item in resp2.json() or []:
+                if item.get("plainLyrics") or item.get("syncedLyrics"):
+                    data = item
+                    break
         if data and (data.get("plainLyrics") or data.get("syncedLyrics")):
             found = {"plain": data.get("plainLyrics"),
                      "synced": data.get("syncedLyrics"),
@@ -513,6 +517,7 @@ def lrclib_lookup(rec: dict):
     except Exception as exc:
         print(f"[music-server] LRCLIB lookup failed ({artist} - {title}): {exc}",
               flush=True)
+        return found
     with _cache_lock:
         _lyrics_cache[tid] = found  # negative results cached too
         _json_save(LYRICS_CACHE_PATH, _lyrics_cache)
@@ -691,12 +696,14 @@ def artist_image():
     if neg_path.is_file():
         return jsonify({"error": "no_artist_image", "artist": name}), 404
     pic_url = None
+    cache_negative = False
     try:
         resp = _http_get("https://api.deezer.com/search/artist", params={"q": name})
         if resp.status_code == 200:
             items = (resp.json().get("data") or [])
             if items:
                 pic_url = items[0].get("picture_medium") or items[0].get("picture")
+            cache_negative = not pic_url
     except Exception as exc:
         print(f"[music-server] Deezer lookup failed ({name}): {exc}", flush=True)
     if pic_url:
@@ -714,10 +721,11 @@ def artist_image():
         except Exception as exc:
             print(f"[music-server] artist image download failed ({name}): {exc}",
                   flush=True)
-    try:
-        neg_path.write_text("none", encoding="utf-8")
-    except OSError:
-        pass
+    if cache_negative:
+        try:
+            neg_path.write_text("none", encoding="utf-8")
+        except OSError:
+            pass
     return jsonify({"error": "no_artist_image", "artist": name}), 404
 
 
