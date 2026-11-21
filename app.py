@@ -1051,8 +1051,12 @@ def _parse_import_file(data: bytes, filename: str) -> list:
     suffix = Path(filename or "").suffix.lower()
     if suffix == ".csv" or (suffix != ".json" and b"," in data[:512]
                             and not data.lstrip().startswith(b"{")):
-        rows = list(csv.DictReader(io.StringIO(data.decode("utf-8-sig",
-                                                           errors="replace"))))
+        rows = csv.DictReader(io.StringIO(data.decode("utf-8-sig",
+                                                     errors="replace")))
+        aliases = {"track name": "title", "artist name(s)": "artist",
+                   "duration (ms)": "duration_ms"}
+        rows.fieldnames = [aliases.get(key.strip().lower(), key.strip().lower())
+                           for key in (rows.fieldnames or [])]
         tracks = [t for t in (_norm_track(r) for r in rows) if t]
         name = Path(filename or "Imported playlist").stem
         return ([{"name": name, "spotify_url": None, "tracks": tracks}]
