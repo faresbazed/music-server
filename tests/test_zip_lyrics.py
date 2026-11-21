@@ -123,11 +123,15 @@ def test_zip_keeps_unicode_equivalent_folders_separate(
     assert lyrics_for("Repeat-2/Repeat.wav")["plain"] == "Second album"
 
 
-@pytest.mark.parametrize("exact_lyrics", [None, "Exact lyrics"])
+@pytest.mark.parametrize(
+    ("fallback_ext", "exact_lyrics"),
+    [(".txt", None), (".txt", "Exact lyrics"), (".lrc", "Exact lyrics")],
+)
 def test_zip_matches_unambiguous_unicode_stem(
-    client, auth_headers, wav, lyrics_for, exact_lyrics
+    client, auth_headers, wav, lyrics_for, fallback_ext, exact_lyrics
 ):
-    entries = [("Album/cafe\u0301.wav", wav), ("Album/café.txt", "Fallback lyrics")]
+    fallback = "[00:00.00]Fallback lyrics" if fallback_ext == ".lrc" else "Fallback lyrics"
+    entries = [("Album/cafe\u0301.wav", wav), (f"Album/café{fallback_ext}", fallback)]
     if exact_lyrics:
         entries.append(("Album/cafe\u0301.txt", exact_lyrics))
     upload_zip(client, auth_headers, entries, saved=1, tracks=1)
@@ -146,6 +150,37 @@ def test_zip_does_not_guess_among_unicode_stem_matches(
 
     assert lyrics_for("ǻ.wav")["source"] == "none"
     assert lyrics_for("ǻ-2/ǻ.wav")["source"] == "none"
+
+
+def test_zip_does_not_guess_among_unicode_sidecar_matches(
+    client, auth_headers, wav, lyrics_for
+):
+    upload_zip(
+        client, auth_headers,
+        [("Album/ǻ.wav", wav), ("Album/å\u0301.txt", "First"), ("Album/a\u030a\u0301.txt", "Second")],
+        saved=1, tracks=1,
+    )
+
+    assert lyrics_for("ǻ.wav")["source"] == "none"
+
+
+def test_zip_does_not_reassign_lyrics_from_skipped_audio(
+    client, auth_headers, wav, lyrics_for, monkeypatch
+):
+    import app as music_server
+
+    monkeypatch.setattr(music_server, "_MAX_ZIP_FILE", len(wav))
+    upload_zip(
+        client, auth_headers,
+        [
+            ("Album/cafe\u0301.wav", wav + b"\0"),
+            ("Album/café.wav", wav),
+            ("Album/cafe\u0301.txt", "Skipped track lyrics"),
+        ],
+        saved=1, tracks=1,
+    )
+
+    assert lyrics_for("café.wav")["source"] == "none"
 
 
 def test_zip_keeps_filename_title_for_playlist_matching(client, auth_headers, wav):

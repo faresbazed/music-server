@@ -32,6 +32,7 @@ import threading
 import time
 import unicodedata
 import zipfile
+from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 
 import requests
@@ -873,6 +874,15 @@ def _save_zip(fh) -> int:
     def normalized_stem(key: PurePosixPath) -> tuple[PurePosixPath, str]:
         return key.parent, unicodedata.normalize("NFC", key.name)
 
+    def unique_aliases(
+        keys: Iterable[PurePosixPath],
+    ) -> dict[tuple[PurePosixPath, str], PurePosixPath | None]:
+        aliases: dict[tuple[PurePosixPath, str], PurePosixPath | None] = {}
+        for key in keys:
+            alias = normalized_stem(key)
+            aliases[alias] = None if alias in aliases else key
+        return aliases
+
     sidecar_exts = {".lrc", ".txt"}
     supported_exts = AUDIO_EXTS | sidecar_exts
     with archive:
@@ -882,7 +892,7 @@ def _save_zip(fh) -> int:
             if path.suffix.lower() in supported_exts
         }
         audio_dests: dict[PurePosixPath, list[Path]] = {}
-        sidecars: list[tuple[zipfile.ZipInfo, PurePosixPath, str]] = []
+        sidecars: dict[PurePosixPath, list[tuple[zipfile.ZipInfo, str]]] = {}
         for info in archive.infolist():
             if info.is_dir():
                 continue
@@ -893,37 +903,40 @@ def _save_zip(fh) -> int:
             path = PurePosixPath(info.filename.replace("\\", "/"))
             key = path.with_suffix("")
             if suffix in sidecar_exts:
-                sidecars.append((info, key, suffix))
+                sidecars.setdefault(key, []).append((info, suffix))
                 continue
+            # Even an audio entry we skip can make a fallback ambiguous.
+            dests = audio_dests.setdefault(key, [])
             data = read_member(info)
             if data is None:
                 continue
             dest = _zip_dest(base, taken_stems)
             dest.write_bytes(data)
             del data
-            audio_dests.setdefault(key, []).append(dest)
+            dests.append(dest)
             taken_stems.add(dest.stem)
             saved += 1
 
-        aliases: dict[tuple[PurePosixPath, str], list[PurePosixPath]] = {}
-        for key in audio_dests:
-            aliases.setdefault(normalized_stem(key), []).append(key)
-
-        # Exact matches claim their sidecars before any Unicode fallback.
-        sidecars.sort(key=lambda sidecar: sidecar[1] not in audio_dests)
-        for info, key, suffix in sidecars:
-            if key not in audio_dests:
-                candidates = aliases.get(normalized_stem(key), [])
-                if len(candidates) != 1:
+        audio_aliases = unique_aliases(audio_dests)
+        sidecar_aliases = unique_aliases(sidecars)
+        for key, dests in audio_dests.items():
+            if not dests:
+                continue
+            matches = sidecars.get(key)
+            if matches is None:
+                alias = normalized_stem(key)
+                sidecar_key = sidecar_aliases.get(alias)
+                if audio_aliases[alias] != key or sidecar_key is None:
                     continue
-                key, = candidates
-            dests = [audio.with_suffix(suffix) for audio in audio_dests[key]]
-            unwritten = [dest for dest in dests if not dest.exists()]
-            data = read_member(info, len(unwritten))
-            if data is not None:
-                for dest in unwritten:
-                    dest.write_bytes(data)
-                del data
+                matches = sidecars[sidecar_key]
+            for info, suffix in matches:
+                lyrics_dests = [audio.with_suffix(suffix) for audio in dests]
+                unwritten = [dest for dest in lyrics_dests if not dest.exists()]
+                data = read_member(info, len(unwritten))
+                if data is not None:
+                    for dest in unwritten:
+                        dest.write_bytes(data)
+                    del data
     return saved
 
 
