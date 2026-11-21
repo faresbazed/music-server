@@ -158,16 +158,26 @@ def _collapse_repeats(norm_text: str) -> str:
     return re.sub(r"(.)\1+", r"\1", norm_text or "")
 
 
-def _artists_match(a: str, b: str) -> bool:
+_ARTIST_FILLER = frozenset({"the", "and", "feat", "ft", "featuring"})
+
+
+def _artist_match_score(a: str, b: str) -> int:
+    """0 = no match; higher = stronger (exact > spelling variant > substring > shared word)."""
     na, nb = _norm(a), _norm(b)
-    if not na or not nb:
-        return False
-    if na == nb or na in nb or nb in na:
-        return True
+    if not (set(na.split()) - _ARTIST_FILLER) or not (set(nb.split()) - _ARTIST_FILLER):
+        return 0
+    if na == nb:
+        return 4
     ca, cb = _collapse_repeats(na), _collapse_repeats(nb)
-    if ca == cb or ca in cb or cb in ca:
-        return True
-    return bool(set(na.split()) & set(nb.split()))
+    if ca == cb:
+        return 3
+    if na in nb or nb in na or ca in cb or cb in ca:
+        return 2
+    return int(bool((set(na.split()) & set(nb.split())) - _ARTIST_FILLER))
+
+
+def _artists_match(a: str, b: str) -> bool:
+    return _artist_match_score(a, b) > 0
 
 
 _PLAIN_FROM_LRC = re.compile(r"\[\d{1,2}:\d{2}(?:[.:]\d{1,3})?\]")
@@ -396,32 +406,26 @@ def scan_library() -> int:
     return len(order)
 
 
-def _file_match_kind(rec: dict, seed_track: dict) -> str | None:
+def _file_matches_seed(rec: dict, seed_track: dict) -> bool:
     ft = _norm(rec.get("title"))
     st = _norm(seed_track.get("title"))
     if not ft or not st:
-        return None
+        return False
     if ft != st and _collapse_repeats(ft) != _collapse_repeats(st):
-        return None
+        return False
     if _artists_match(rec.get("artist") or "", seed_track.get("artist") or ""):
-        return "artist"
+        return True
     # fall back to duration agreement (within 3 seconds)
     dur = rec.get("duration_sec")
     seed_ms = _duration_ms(seed_track.get("duration_ms"))
-    if dur is not None and seed_ms is not None and abs(dur - seed_ms / 1000) <= 3.0:
-        return "duration"
-    return None
+    return dur is not None and seed_ms is not None and abs(dur - seed_ms / 1000) <= 3.0
 
 
 def _match_file_for_seed(seed_track: dict, records: list[dict]):
-    fallback = None
-    for rec in records:
-        kind = _file_match_kind(rec, seed_track)
-        if kind == "artist":
-            return rec
-        if kind == "duration" and fallback is None:
-            fallback = rec
-    return fallback
+    candidates = (rec for rec in records if _file_matches_seed(rec, seed_track))
+    return max(candidates, key=lambda rec: _artist_match_score(
+        rec.get("artist") or "", seed_track.get("artist") or ""
+    ), default=None)
 
 
 # ---------------------------------------------------------------------------
