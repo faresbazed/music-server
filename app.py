@@ -34,7 +34,7 @@ import unicodedata
 import zipfile
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import requests
 from flask import (Flask, abort, jsonify, make_response, request,
@@ -1237,6 +1237,16 @@ def missing():
     return jsonify(_playlist_report(pl))
 
 
+def _download_filename(name: str, fallback: str) -> str:
+    name = unicodedata.normalize("NFC", name)
+    name = "".join(char for char in name
+                   if not unicodedata.category(char).startswith("C")
+                   and char not in '<>:"/\\|?*')
+    name = re.sub(r"\s+", " ", name).strip(" .")
+    name = name.encode("utf-8")[:180].decode("utf-8", errors="ignore").rstrip(" .")
+    return name or fallback
+
+
 @app.route("/api/download-playlist")
 def download_playlist():
     pl = _find_playlist(request.args.get("playlist") or "")
@@ -1255,9 +1265,9 @@ def download_playlist():
             path = Path(rec["path"])
             if not path.is_file():
                 continue
-            ext = path.suffix.lower() or ".mp3"
-            base = secure_filename(
-                f"{idx:03d} - {st.get('title') or path.stem}") or f"{idx:03d}"
+            ext = "." + _download_filename(path.suffix.lower().lstrip("."), "mp3")
+            base = _download_filename(
+                f"{idx:03d} - {st.get('title') or path.stem}", f"{idx:03d}")
             arc = base + ext
             n = 2
             while arc in used:
@@ -1277,9 +1287,17 @@ def download_playlist():
                         "detail": "none of this playlist's tracks are "
                                   "uploaded to this server yet"}), 404
     buf.seek(0)
-    safe = secure_filename(pl.get("name") or "playlist") or "playlist"
-    return send_file(buf, mimetype="application/zip", as_attachment=True,
-                     download_name=f"{safe}.zip")
+    safe = _download_filename(pl.get("name") or "", "playlist")
+    ascii_name = secure_filename(safe)
+    if not re.search(r"[A-Za-z0-9]", ascii_name):
+        ascii_name = "playlist"
+    response = send_file(buf, mimetype="application/zip", as_attachment=True,
+                         download_name=f"{ascii_name}.zip")
+    if not safe.isascii():
+        response.headers.set(
+            "Content-Disposition", "attachment", filename=f"{ascii_name}.zip",
+            **{"filename*": "UTF-8''" + quote(f"{safe}.zip", safe="")})
+    return response
 
 
 _IMPORT_TOKEN_PAGE = _UPLOAD_TOKEN_PAGE.replace('action="/upload"',
