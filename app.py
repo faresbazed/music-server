@@ -536,6 +536,12 @@ except Exception:
     pass
 
 
+def _token_matches(candidate: str | None) -> bool:
+    # compare bytes: compare_digest raises TypeError on non-ASCII str
+    return bool(candidate) and hmac.compare_digest(
+        candidate.encode("utf-8"), LIBRARY_TOKEN.encode("utf-8"))
+
+
 def _token_ok() -> bool:
     candidates = [
         request.headers.get("X-Library-Token"),
@@ -547,10 +553,7 @@ def _token_ok() -> bool:
             candidates.append(request.form.get("token"))
         except Exception:
             pass
-    for cand in candidates:
-        if cand and hmac.compare_digest(str(cand), LIBRARY_TOKEN):
-            return True
-    return False
+    return any(_token_matches(cand) for cand in candidates)
 
 
 @app.before_request
@@ -819,7 +822,7 @@ def upload_page():
     resp = make_response(_UPLOAD_PAGE)
     # remember the token on this device so it is only typed once
     supplied = request.args.get("token") or request.headers.get("X-Library-Token")
-    if supplied and hmac.compare_digest(str(supplied), LIBRARY_TOKEN):
+    if _token_matches(supplied):
         resp.set_cookie("library_token", LIBRARY_TOKEN, max_age=30 * 24 * 3600,
                         httponly=True, samesite="Lax")
     return resp
@@ -1343,7 +1346,7 @@ def import_page():
         return make_response(_IMPORT_TOKEN_PAGE)
     resp = make_response(_IMPORT_PAGE)
     supplied = request.args.get("token") or request.headers.get("X-Library-Token")
-    if supplied and hmac.compare_digest(str(supplied), LIBRARY_TOKEN):
+    if _token_matches(supplied):
         resp.set_cookie("library_token", LIBRARY_TOKEN, max_age=30 * 24 * 3600,
                         httponly=True, samesite="Lax")
     return resp
