@@ -157,9 +157,13 @@ def _collapse_repeats(norm_text: str) -> str:
     return re.sub(r"(.)\1+", r"\1", norm_text or "")
 
 
+_ARTIST_FILLER = frozenset({"the", "and", "feat", "ft", "featuring"})
+
+
 def _artist_match_score(a: str, b: str) -> int:
+    """0 = no match; higher = stronger (exact > spelling variant > substring > shared word)."""
     na, nb = _norm(a), _norm(b)
-    filler = {"the", "and", "feat", "ft", "featuring"}
+    filler = _ARTIST_FILLER
     if not (set(na.split()) - filler) or not (set(nb.split()) - filler):
         return 0
     if na == nb:
