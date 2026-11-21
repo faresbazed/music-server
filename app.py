@@ -1012,11 +1012,14 @@ def _norm_track(raw: dict):
 
 
 def _parse_track_text(text: str) -> list:
+    lines = [line.strip() for line in (text or "").splitlines()
+             if line.strip() and not line.strip().startswith("#")]
+    comma_lines = [line for line in lines
+                   if not any(sep in line for sep in ("|", "\t", " - "))]
+    comma_delimited = (len(comma_lines) >= 2
+                       and all("," in line for line in comma_lines))
     tracks = []
-    for line in (text or "").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
+    for line in lines:
         title, artist = line, None
         if "|" in line:
             title, artist = (p.strip() for p in line.split("|", 1))
@@ -1024,7 +1027,7 @@ def _parse_track_text(text: str) -> list:
             title, artist = (p.strip() for p in line.split("\t", 1))
         elif " - " in line:
             title, artist = (p.strip() for p in line.split(" - ", 1))
-        elif "," in line:
+        elif comma_delimited and "," in line:
             title, artist = (p.strip() for p in line.split(",", 1))
         t = _norm_track({"title": title, "artist": artist})
         if t:
