@@ -230,7 +230,7 @@ def _extract_artwork(audio, tags) -> bytes | None:
                     return bytes(frame.data)
     except Exception:
         pass
-    if isinstance(tags, dict):
+    if hasattr(tags, "get"):
         # MP4 covr
         covr = tags.get("covr")
         if covr:
@@ -238,6 +238,7 @@ def _extract_artwork(audio, tags) -> bytes | None:
                 return bytes(covr[0])
             except Exception:
                 pass
+    if isinstance(tags, dict):
         # Vorbis embedded picture (base64 FLAC block) - best effort
         mbp = tags.get("metadata_block_picture")
         if mbp:
