@@ -117,6 +117,13 @@ LIBRARY_TOKEN=test123 DATA_DIR=./data .venv/bin/python app.py
 curl -H "X-Library-Token: test123" http://localhost:5000/api/catalog
 ```
 
+## Run tests
+
+```sh
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m pytest
+```
+
 ## Files
 
 - `app.py` — the whole server (Flask, single file)
