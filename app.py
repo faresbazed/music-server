@@ -157,16 +157,23 @@ def _collapse_repeats(norm_text: str) -> str:
     return re.sub(r"(.)\1+", r"\1", norm_text or "")
 
 
-def _artists_match(a: str, b: str) -> bool:
+def _artist_match_score(a: str, b: str) -> int:
     na, nb = _norm(a), _norm(b)
-    if not na or not nb:
-        return False
-    if na == nb or na in nb or nb in na:
-        return True
+    filler = {"the", "and", "feat", "ft", "featuring"}
+    if not (set(na.split()) - filler) or not (set(nb.split()) - filler):
+        return 0
+    if na == nb:
+        return 4
     ca, cb = _collapse_repeats(na), _collapse_repeats(nb)
-    if ca == cb or ca in cb or cb in ca:
-        return True
-    return bool(set(na.split()) & set(nb.split()))
+    if ca == cb:
+        return 3
+    if na in nb or nb in na or ca in cb or cb in ca:
+        return 2
+    return int(bool((set(na.split()) & set(nb.split())) - filler))
+
+
+def _artists_match(a: str, b: str) -> bool:
+    return _artist_match_score(a, b) > 0
 
 
 _PLAIN_FROM_LRC = re.compile(r"\[\d{1,2}:\d{2}(?:[.:]\d{1,3})?\]")
@@ -411,10 +418,10 @@ def _file_matches_seed(rec: dict, seed_track: dict) -> bool:
 
 
 def _match_file_for_seed(seed_track: dict, records: list[dict]):
-    for rec in records:
-        if _file_matches_seed(rec, seed_track):
-            return rec
-    return None
+    candidates = (rec for rec in records if _file_matches_seed(rec, seed_track))
+    return max(candidates, key=lambda rec: _artist_match_score(
+        rec.get("artist") or "", seed_track.get("artist") or ""
+    ), default=None)
 
 
 # ---------------------------------------------------------------------------
