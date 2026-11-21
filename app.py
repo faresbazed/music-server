@@ -32,6 +32,7 @@ import time
 import unicodedata
 import zipfile
 from pathlib import Path
+from urllib.parse import urlencode
 
 import requests
 from flask import (Flask, abort, jsonify, make_response, request,
@@ -1299,13 +1300,14 @@ def import_submit():
             f"<li>{html_mod.escape(t.get('title') or '')} - "
             f"{html_mod.escape(t.get('artist') or '')}</li>"
             for t in rep["missing_tracks"])
-        name_q = html_mod.escape(pl.get("name") or "", quote=True)
+        download_q = html_mod.escape(
+            urlencode({"playlist": pl.get("name") or ""}), quote=True)
         sections.append(
             f"<h1>{html_mod.escape(pl.get('name') or '')}</h1>"
             f"<p>{rep['matched']} of {rep['total']} track(s) matched your "
             f"uploaded files; {rep['missing_count']} missing.</p>"
             f"<ul>{missing_html}</ul>"
-            f'<p><a href="/api/download-playlist?playlist={name_q}">'
+            f'<p><a href="/api/download-playlist?{download_q}">'
             "Download ZIP of matched (your) files</a></p>")
     return make_response(
         "<!doctype html><title>Imported</title>" + "".join(sections)
