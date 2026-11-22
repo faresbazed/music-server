@@ -1367,7 +1367,7 @@ textarea{height:9em}fieldset{margin:1em 0}</style>
 <p>This imports the <b>track list only</b>. Tracks are matched against
 <b>your own MP3s already uploaded</b> to this server - nothing is
 downloaded from Spotify. You get a matched / missing report, and matched
-playlists appear in the app catalogue ready for Download All.</p>
+playlists appear in the app catalogue. Tap Save matched to keep them on your iPad.</p>
 <fieldset><legend>1. Spotify playlist link (needs server Spotify keys)</legend>
 <p>For a personal Spotify developer app, connect the owner account first.
 Use a playlist you own or collaborate on.</p>

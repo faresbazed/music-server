@@ -32,8 +32,8 @@ recordings — from the web page **`/import`**, from the iPad app, or via the AP
 
 Imported playlists are saved to `$DATA_DIR/imported_playlists.json` (so
 they survive redeploys on the Volume), appear in `/api/catalog` next to
-the seed playlists, and can be opened in the app and **Download All**-ed
-into the iPad Library. `GET /api/missing?playlist=<name>` reports which
+the seed playlists. Open a playlist in the app and tap **Save matched**
+to copy its available recordings to **On My iPad**. `GET /api/missing?playlist=<name>` reports which
 tracks you haven't uploaded yet, and
 `GET /api/download-playlist?playlist=<name>` returns a ZIP of the
 **matched files only** (your own MP3s) plus `playlist.m3u` and a
@@ -56,6 +56,8 @@ tracks you haven't uploaded yet, and
 ## API (all `/api/*` need the token)
 
 Send the token as header `X-Library-Token: <token>`, or `?token=<token>`.
+The iPad uses the header and requests `/api/catalog?enrich=0` to avoid
+waiting for online album lookups before starting a download.
 
 | Endpoint | What it returns |
 |---|---|

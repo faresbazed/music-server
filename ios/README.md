@@ -38,6 +38,13 @@ Optional host-side storage tests (Clang + GNUstep Foundation on Linux, or Xcode 
 
 ## Sign and install on a stock iPad
 
+For a personal install on Windows or Mac, [Sideloadly](https://sideloadly.io/)
+supports iOS 9: connect the unlocked iPad by USB, trust the computer, select the
+device and the downloaded IPA, then sign with your Apple ID on your computer.
+A free Apple ID typically requires re-signing every seven days. Never enter
+your Apple ID credentials on the music server. If you prefer to use Apple's
+tools and your own certificate, follow the steps below.
+
 Keep the private key and profile on your Mac; don't send them to the server or commit them. Use **one** of these flows:
 
 - **With an Apple development or ad hoc profile:** On your Mac, use [Certificates, Identifiers & Profiles](https://developer.apple.com/account/resources/) to register your iPad UDID and an explicit iOS app identifier. Create an iOS development or ad hoc provisioning profile for that identifier, device and signing certificate. Install that certificate **and its private key** in your Mac's Keychain; download the profile. Use a profile valid for this device and Apple signing tools compatible with iOS 9.
