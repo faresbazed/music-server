@@ -40,12 +40,14 @@ from urllib.parse import quote, urlencode
 
 import mutagen
 import requests
-from flask import (Flask, abort, jsonify, make_response, request,
-                   send_file)
+from flask import (Flask, abort, jsonify, make_response, redirect, request,
+                   send_file, session)
 from mutagen.aac import AAC
 from mutagen.apev2 import APEv2File
 from mutagen.id3 import ID3FileType
 from werkzeug.utils import secure_filename
+
+from spotify_client import SpotifyClient
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -95,12 +97,13 @@ def _resolve_token() -> str:
             return saved
     tok = secrets.token_urlsafe(24)
     try:
-        token_file.write_text(tok + "\n", encoding="utf-8")
+        with os.fdopen(os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                               0o600), "w") as out:
+            out.write(tok + "\n")
     except OSError as exc:
         print(f"[music-server] WARNING: could not save token: {exc}", flush=True)
-    print(f"[music-server] LIBRARY_TOKEN not set; generated token: {tok}", flush=True)
-    print(f"[music-server] (saved to {token_file} - set LIBRARY_TOKEN on Railway "
-          "to choose your own)", flush=True)
+    print("[music-server] Set LIBRARY_TOKEN on Railway to choose your own token.",
+          flush=True)
     return tok
 
 
@@ -574,6 +577,10 @@ def lrclib_lookup(rec: dict):
 # ---------------------------------------------------------------------------
 
 app = Flask(__name__)
+spotify = SpotifyClient(DATA_DIR)
+app.secret_key = hmac.digest(LIBRARY_TOKEN.encode(), b"spotify-connect", "sha256")
+app.config.update(SESSION_COOKIE_SAMESITE="Lax",
+                  SESSION_COOKIE_SECURE=not os.environ.get("SPOTIFY_REDIRECT_URI", "").startswith("http://"))
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024  # 1 GB uploads
 try:
     app.json.ensure_ascii = False  # Flask >= 2.2: keep Arabic titles readable
@@ -608,7 +615,8 @@ def _auth_gate():
         if not _token_ok():
             return jsonify({"error": "unauthorized",
                             "detail": "missing or wrong library token"}), 401
-    elif path in ("/upload", "/import") and request.method != "GET":
+    elif path in ("/spotify/connect", "/spotify/callback") or (
+            path in ("/upload", "/import") and request.method != "GET"):
         if not _token_ok():
             return jsonify({"error": "unauthorized",
                             "detail": "missing or wrong library token"}), 401
@@ -620,13 +628,15 @@ def _snapshot():
         return list(_FILES.values()), [ _FILES[i] for i in _FILES_ORDER ]
 
 
-def _public_track(rec: dict, spotify_url=None, album_override=None) -> dict:
+def _public_track(rec: dict, spotify_url=None, album_override=None, *, enrich=True) -> dict:
     album = rec.get("album") or album_override
-    if not album:
-        enriched = itunes_lookup(rec.get("artist") or "", rec.get("title") or "")
-        if enriched:
-            album = enriched.get("album")
+    if not album and enrich:
+        found = itunes_lookup(rec.get("artist") or "", rec.get("title") or "")
+        album = found.get("album") if found else None
     with _cache_lock:
+        if not album:
+            key = f"{_norm(rec.get('artist'))}|{_norm(rec.get('title'))}"
+            album = (_enrich_cache.get(key) or {}).get("album")
         lyr_cached = _lyrics_cache.get(rec["id"])
     has_lyrics = bool(rec.get("has_lyrics_local")
                       or (lyr_cached and lyr_cached.get("source") not in (None, "none")))
@@ -650,7 +660,7 @@ def status():
         count = len(_FILES)
     payload = {"ok": True, "service": "music-library-server",
                "tracks": count, "playlists": len(_all_playlists())}
-    if request.accept_mimetypes.best == "text/html":
+    if request.accept_mimetypes["text/html"] > request.accept_mimetypes["application/json"]:
         return make_response(
             "<!doctype html><title>Music Library Server</title>"
             f"<h1>Music Library Server</h1><p>OK &middot; {count} track(s) &middot; "
@@ -663,14 +673,16 @@ def status():
 @app.route("/api/catalog")
 def catalog():
     _all, ordered = _snapshot()
-    library = [_public_track(rec) for rec in ordered]
+    enrich = request.args.get("enrich") != "0"
+    library = [_public_track(rec, enrich=enrich) for rec in ordered]
     playlists = []
     for pl in _all_playlists():
         tracks = []
         for st in pl.get("tracks", []):
             rec = _match_file_for_seed(st, ordered)
             if rec is not None:
-                tracks.append(_public_track(rec, spotify_url=st.get("spotify_url")))
+                tracks.append(_public_track(rec, spotify_url=st.get("spotify_url"),
+                                            enrich=enrich))
             else:
                 dur_ms = _duration_ms(st.get("duration_ms"))
                 tracks.append({
@@ -835,11 +847,28 @@ _UPLOAD_TOKEN_PAGE = """<!doctype html>
 input,button{font-size:1em;padding:.5em;width:100%;box-sizing:border-box;margin:.4em 0}</style>
 <h1>Music Library</h1>
 <p>Enter the library token once - it is kept in a cookie on this device.</p>
-<form method="GET" action="/upload">
+<form method="POST" action="/login">
+  <input type="hidden" name="page" value="/upload">
   <input type="password" name="token" placeholder="Library token" required>
   <button type="submit">Continue</button>
 </form>
 """
+
+
+def _remember_library_token(response):
+    response.set_cookie("library_token", LIBRARY_TOKEN, max_age=30 * 24 * 3600,
+                        httponly=True, samesite="Lax",
+                        secure=request.is_secure or bool(os.environ.get("RAILWAY_ENVIRONMENT_ID")))
+    return response
+
+
+@app.post("/login")
+def library_login():
+    if not _token_matches(request.form.get("token")):
+        return "Wrong library token. Go back and try again.", 401
+    target = "/import" if request.form.get("page") == "/import" else "/upload"
+    return _remember_library_token(redirect(target, code=303))
+
 
 _UPLOAD_PAGE = """<!doctype html>
 <title>Music Library - upload</title>
@@ -868,8 +897,7 @@ def upload_page():
     # remember the token on this device so it is only typed once
     supplied = request.args.get("token") or request.headers.get("X-Library-Token")
     if _token_matches(supplied):
-        resp.set_cookie("library_token", LIBRARY_TOKEN, max_age=30 * 24 * 3600,
-                        httponly=True, samesite="Lax")
+        _remember_library_token(resp)
     return resp
 
 
@@ -1041,9 +1069,7 @@ def upload_files():
 # seed playlists. It never fetches audio: matched tracks are the files
 # already on this server, missing tracks are only reported by name.
 # Three ways in:
-#   1. Spotify playlist link - needs SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET
-#      env vars (a free app at developer.spotify.com). Client-credentials
-#      flow, public playlists only, metadata only.
+#   1. Spotify playlist link - connects to the owner's Spotify account.
 #   2. Paste a track list - one per line: "Title | Artist" (or Title - Artist).
 #   3. Upload a .json (seed/Spotify shape) or .csv (title,artist) file.
 # ---------------------------------------------------------------------------
@@ -1066,40 +1092,12 @@ def _parse_spotify_playlist_id(value: str):
 
 
 def _spotify_fetch_playlist(playlist_id: str) -> dict:
-    cid = os.environ.get("SPOTIFY_CLIENT_ID", "").strip()
-    secret = os.environ.get("SPOTIFY_CLIENT_SECRET", "").strip()
-    if not cid or not secret:
-        raise ValueError(
-            "spotify_not_configured: set SPOTIFY_CLIENT_ID and "
-            "SPOTIFY_CLIENT_SECRET on Railway (free app at "
-            "developer.spotify.com), or use the paste / file import instead")
-    tok_resp = requests.post(
-        "https://accounts.spotify.com/api/token",
-        data={"grant_type": "client_credentials"},
-        auth=(cid, secret), timeout=HTTP_TIMEOUT,
-        headers={"User-Agent": USER_AGENT})
-    if tok_resp.status_code != 200:
-        raise ValueError(f"spotify_auth_failed: HTTP {tok_resp.status_code}")
-    headers = {"Authorization": f"Bearer {tok_resp.json().get('access_token')}",
-               "User-Agent": USER_AGENT}
-    resp = requests.get(f"https://api.spotify.com/v1/playlists/{playlist_id}",
-                        headers=headers, timeout=HTTP_TIMEOUT)
-    if resp.status_code != 200:
-        raise ValueError(f"spotify_fetch_failed: HTTP {resp.status_code}")
-    data = resp.json()
-    items, nxt = [], (data.get("tracks") or {}).get("next")
-    items.extend((data.get("tracks") or {}).get("items") or [])
-    while nxt:
-        r2 = requests.get(nxt, headers=headers, timeout=HTTP_TIMEOUT)
-        if r2.status_code != 200:
-            break
-        page = r2.json()
-        items.extend(page.get("items") or [])
-        nxt = page.get("next")
+    data, items = spotify.playlist(playlist_id)
     tracks = []
     for item in items:
-        tr = (item or {}).get("track") if isinstance(item, dict) else None
-        if not tr or tr.get("is_local"):
+        tr = item.get("item", item.get("track")) if isinstance(item, dict) else None
+        if (not isinstance(tr, dict) or not tr.get("name") or item.get("is_local")
+                or tr.get("is_local") or tr.get("type", "track") != "track"):
             continue
         artists = ", ".join(a.get("name", "") for a in (tr.get("artists") or [])
                             if a.get("name"))
@@ -1357,8 +1355,7 @@ def download_playlist():
     return response
 
 
-_IMPORT_TOKEN_PAGE = _UPLOAD_TOKEN_PAGE.replace('action="/upload"',
-                                                'action="/import"')
+_IMPORT_TOKEN_PAGE = _UPLOAD_TOKEN_PAGE.replace('value="/upload"', 'value="/import"')
 
 _IMPORT_PAGE = """<!doctype html>
 <title>Music Library - import playlist</title>
@@ -1370,8 +1367,13 @@ textarea{height:9em}fieldset{margin:1em 0}</style>
 <p>This imports the <b>track list only</b>. Tracks are matched against
 <b>your own MP3s already uploaded</b> to this server - nothing is
 downloaded from Spotify. You get a matched / missing report, and matched
-playlists appear in the app catalogue ready for Download All.</p>
+playlists appear in the app catalogue. Tap Save matched to keep them on your iPad.</p>
 <fieldset><legend>1. Spotify playlist link (needs server Spotify keys)</legend>
+<p>For a personal Spotify developer app, connect the owner account first.
+Use a playlist you own or collaborate on.</p>
+<form method="POST" action="/spotify/connect">
+  <button type="submit">Connect Spotify account</button>
+</form>
 <form method="POST" action="/import">
   <input type="hidden" name="mode" value="spotify">
   <input type="text" name="url" placeholder="https://open.spotify.com/playlist/...">
@@ -1390,7 +1392,7 @@ playlists appear in the app catalogue ready for Download All.</p>
   <input type="file" name="file" accept=".json,.csv">
   <button type="submit">Import file</button>
 </form></fieldset>
-<p><a href="/api/download-playlist">.</a><a href="/upload">Upload music</a></p>
+<p><a href="/upload">Upload music</a></p>
 """
 
 
@@ -1401,9 +1403,38 @@ def import_page():
     resp = make_response(_IMPORT_PAGE)
     supplied = request.args.get("token") or request.headers.get("X-Library-Token")
     if _token_matches(supplied):
-        resp.set_cookie("library_token", LIBRARY_TOKEN, max_age=30 * 24 * 3600,
-                        httponly=True, samesite="Lax")
+        _remember_library_token(resp)
     return resp
+
+
+@app.post("/spotify/connect")
+def spotify_connect():
+    try:
+        state, url = spotify.authorization()
+    except ValueError as exc:
+        return jsonify(error="spotify_config", detail=str(exc)), 400
+    session["spotify_login"] = [state, int(time.time())]
+    return redirect(url, code=303)
+
+
+@app.get("/spotify/callback")
+def spotify_callback():
+    pending = session.pop("spotify_login", None)
+    state = request.args.get("state", "")
+    if (not pending or not secrets.compare_digest(pending[0].encode(), state.encode())
+            or time.time() - pending[1] > 600):
+        return "Spotify connection expired or invalid. Start again on /import.", 400
+    code = request.args.get("code")
+    if not code:
+        return "Spotify connection canceled. Start again on /import.", 400
+    try:
+        spotify.connect(code)
+    except ValueError as exc:
+        return jsonify(error="spotify_connect_failed", detail=str(exc)), 400
+    response = redirect("/import", code=303)
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.route("/import", methods=["POST"])
