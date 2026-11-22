@@ -18,17 +18,14 @@ Metro Boomin / Kendrick Lamar …)). All playlists ship in the catalogue — a
 playlist track with no uploaded file yet simply shows `has_file: false`
 until you upload a file whose title + artist (or duration) matches it.
 
-## Playlist importer (v1.1)
+## Playlist import and offline playback
 
 Import a playlist's **track list** and match it against your own uploaded
-MP3s — from the web page **`/import`**, from the iPad app (Server →
-**Import**), or via the API:
+recordings — from the web page **`/import`**, from the iPad app, or via the API:
 
-1. **Spotify playlist link** — needs `SPOTIFY_CLIENT_ID` +
-   `SPOTIFY_CLIENT_SECRET` env vars (create a free app at
-   developer.spotify.com; client-credentials flow, public playlists,
-   **metadata only**). Without the keys you get a clear
-   `spotify_not_configured` error, not a fake success.
+1. **Spotify playlist link** — connect Spotify once (instructions below),
+   then paste the link. This imports **metadata only**; it cannot export
+   a Spotify Premium offline download as an audio file.
 2. **Paste a track list** — one per line, `Title | Artist`.
 3. **Upload a `.json` / `.csv`** track list (seed/Spotify shape, or
    `title,artist` columns).
@@ -84,16 +81,13 @@ Send the token as header `X-Library-Token: <token>`, or `?token=<token>`.
 1. **Push this folder to a GitHub repo** (or `railway up` from this folder).
    `playlists_seed.json` must be in the repo — it's the playlist data.
 2. In Railway: **New Project → Deploy from GitHub repo**, pick the repo.
-   Railway reads `railway.json` / `Procfile` and starts:
+   Select the branch containing these changes. Railway reads `railway.json` and starts:
    `gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4`
 3. **Attach a Volume** (service → Settings → Volumes) mounted at **`/data`**.
-   Without it, uploaded music is wiped on every redeploy. Note Railway
-   Hobby volumes are capped at **5 GB** (~700–900 MP3s); a bigger library
-   needs Pro or object storage (e.g. Cloudflare R2) later.
+   Without it, uploads and Spotify authorization are lost on redeploy.
 4. **Set the environment variable `LIBRARY_TOKEN`** to a long secret you
    choose (service → Variables). If you skip this, the server generates a
-   token on first boot, saves it to `/data/token.txt` and prints it in the
-   deploy logs — grab it from there.
+   token on first boot in `/data/token.txt`; it does not log the value.
    Optional: `DATA_DIR=/data` (default), `MUSIC_DIR=/data/music` (default).
 5. **Generate a public domain** (service → Settings → Networking) — you'll
    get a `https://….up.railway.app` URL.
@@ -103,10 +97,31 @@ Send the token as header `X-Library-Token: <token>`, or `?token=<token>`.
    folder — never one song at a time (your own files —
    e.g. exported from your PC library). Tags decide artist/album; file
    names don't matter much.
-7. **Point the iPad app at it:** in Offline Music v2's server settings,
-   enter the Railway URL and the same `LIBRARY_TOKEN`. The app can then
-   browse the catalogue by playlist, stream, see covers/lyrics, and
-   download tracks for offline playback.
+7. **Connect the iPad:** install the [native iPad client](ios/README.md)
+   and enter the HTTPS Railway URL and the same library token. Open a
+   playlist and download its available tracks. To check offline playback,
+   enable Airplane Mode, quit and reopen the app, and play a saved track.
+   You can try a seed playlist or import a CSV without any Spotify credentials.
+
+### Connect Spotify for live playlist links
+
+1. In the [Spotify developer dashboard](https://developer.spotify.com/dashboard),
+   configure a Web API app and register `https://<your-railway-domain>/spotify/callback`
+   as a redirect URI. In [development mode](https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide)
+   the app owner needs Premium; playlist contents are available only for
+   playlists the signed-in user owns or collaborates on.
+2. In Railway service variables set `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`,
+   and `SPOTIFY_REDIRECT_URI` (exactly the registered URI); deploy the changes.
+3. In a browser, open **/import**, enter the library token, and choose
+   **Connect Spotify account**. After consent, paste the playlist link in
+   the app or browser. Upload missing recordings via **/upload**.
+   The refresh token is private to the server volume; no Spotify credentials
+   go in the IPA. To disconnect, [revoke access](https://www.spotify.com/account/apps/)
+   and remove `$DATA_DIR/spotify_refresh_token`. Reconnect if authorization expires.
+
+Previously authorized extended-quota apps can still import supported public
+playlists with client credentials. The app reports inaccessible playlists
+and failed pages instead of saving an empty or partial import.
 
 ## Run locally
 
@@ -126,7 +141,7 @@ curl -H "X-Library-Token: test123" http://localhost:5000/api/catalog
 
 ## Files
 
-- `app.py` — the whole server (Flask, single file)
+- `app.py`, `spotify_client.py` — Flask library server and Spotify metadata client
 - `playlists_seed.json` — Spotify playlist export (do not edit by hand)
 - `requirements.txt`, `Procfile`, `railway.json` — deployment
 - Runtime data (never committed): `$DATA_DIR/music/` (uploads),
