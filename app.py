@@ -628,8 +628,11 @@ def _snapshot():
         return list(_FILES.values()), [ _FILES[i] for i in _FILES_ORDER ]
 
 
-def _public_track(rec: dict, spotify_url=None, album_override=None) -> dict:
+def _public_track(rec: dict, spotify_url=None, album_override=None, *, enrich=True) -> dict:
     album = rec.get("album") or album_override
+    if not album and enrich:
+        found = itunes_lookup(rec.get("artist") or "", rec.get("title") or "")
+        album = found.get("album") if found else None
     with _cache_lock:
         if not album:
             key = f"{_norm(rec.get('artist'))}|{_norm(rec.get('title'))}"
@@ -670,14 +673,16 @@ def status():
 @app.route("/api/catalog")
 def catalog():
     _all, ordered = _snapshot()
-    library = [_public_track(rec) for rec in ordered]
+    enrich = request.args.get("enrich") != "0"
+    library = [_public_track(rec, enrich=enrich) for rec in ordered]
     playlists = []
     for pl in _all_playlists():
         tracks = []
         for st in pl.get("tracks", []):
             rec = _match_file_for_seed(st, ordered)
             if rec is not None:
-                tracks.append(_public_track(rec, spotify_url=st.get("spotify_url")))
+                tracks.append(_public_track(rec, spotify_url=st.get("spotify_url"),
+                                            enrich=enrich))
             else:
                 dur_ms = _duration_ms(st.get("duration_ms"))
                 tracks.append({

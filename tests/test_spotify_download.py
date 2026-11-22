@@ -1,5 +1,6 @@
 import io
 import stat
+import sys
 from unittest.mock import Mock
 from urllib.parse import parse_qs, urlsplit
 
@@ -16,6 +17,15 @@ CALLBACK = "/spotify/callback"
 
 def reply(body, status=200):
     return Mock(status_code=status, json=Mock(return_value=body))
+
+
+def test_catalog_can_skip_network_without_changing_default(client, auth_headers, monkeypatch):
+    client.post("/upload", headers=auth_headers, data={"files": (io.BytesIO(wav_bytes()), "First.wav")})
+    lookup = Mock(return_value={"album": "Matched album"})
+    monkeypatch.setattr(sys.modules["app"], "itunes_lookup", lookup)
+    assert client.get("/api/catalog?enrich=0", headers=auth_headers).json["library"][0]["album"] is None
+    lookup.assert_not_called()
+    assert client.get("/api/catalog", headers=auth_headers).json["library"][0]["album"] == "Matched album"
 
 
 @pytest.fixture
