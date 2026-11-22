@@ -660,7 +660,7 @@ def status():
         count = len(_FILES)
     payload = {"ok": True, "service": "music-library-server",
                "tracks": count, "playlists": len(_all_playlists())}
-    if request.accept_mimetypes.best == "text/html":
+    if request.accept_mimetypes["text/html"] > request.accept_mimetypes["application/json"]:
         return make_response(
             "<!doctype html><title>Music Library Server</title>"
             f"<h1>Music Library Server</h1><p>OK &middot; {count} track(s) &middot; "

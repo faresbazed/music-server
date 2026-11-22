@@ -19,6 +19,12 @@ def reply(body, status=200):
     return Mock(status_code=status, json=Mock(return_value=body))
 
 
+def test_browser_landing_keeps_machine_healthcheck(client):
+    browser = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    assert 'href="/import"' in client.get("/", headers={"Accept": browser}).text
+    assert client.get("/", headers={"Accept": "*/*"}).json["ok"]
+
+
 def test_catalog_can_skip_network_without_changing_default(client, auth_headers, monkeypatch):
     client.post("/upload", headers=auth_headers, data={"files": (io.BytesIO(wav_bytes()), "First.wav")})
     lookup = Mock(return_value={"album": "Matched album"})
